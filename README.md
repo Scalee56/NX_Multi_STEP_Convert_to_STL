@@ -35,17 +35,39 @@ Settings are at the top of the `NXJournal` class:
 
 To change the folders or tolerances, edit these lines directly before running the journal.
 
+## Prerequisites
+
+- Siemens NX with the **Journal** feature available (standard in most licenses; needs the NX Open .NET environment, installed by default with NX).
+- Write permissions on the output folder (and on the Desktop, used as a fallback for the log).
+- The two folders referenced by the script:
+  - `C:\Users\AndreaScalenghe\Desktop\STEP_Convert` (input)
+  - `C:\Users\AndreaScalenghe\Desktop\STL_Convert` (output)
+
+  The output folder is created automatically by the script if it doesn't exist yet. The input folder must exist beforehand and contain the STEP files, otherwise the script stops immediately with an error in the log.
+
+## Setup
+
+1. **Save the file** `BatchConvertSTEPtoSTL.cs` somewhere accessible (e.g. Desktop or a dedicated `Journals` folder). NX doesn't need it in any specific location.
+2. **Check the paths at the top of the file** (`inputFolder`, `outputFolder`). If your username or folder structure is different from `AndreaScalenghe\Desktop\...`, edit these two lines directly in the `.cs` file with a text editor (Notepad is fine) before running it in NX.
+3. **Check the tolerances** (`chordalTol`, `adjacencyTol`, `angularTol`) against the ones you'd normally set in a manual STL export for the same process (MJF, SLA, FDM). Adjust them here if needed; there's no in-NX dialog for this, since the journal runs unattended.
+4. **Decide on `onlySolidBodies`**: leave it `true` for standard AM export (solids only); set it to `false` only if you also need to export loose surface bodies.
+5. **Populate the input folder** with the STEP files to convert (`.stp` or `.step`, both are picked up).
+
 ## How to use it
 
-1. Copy the STEP files to convert into `STEP_Convert` (or update `inputFolder`).
-2. Open NX and go to **Tools > Journal > Play...**
-3. Select the `BatchConvertSTEPtoSTL.cs` file.
-4. Watch the progress in the Listing Window.
-5. When finished, you'll find the STL files in the output folder, along with:
-   - `log_conversione.txt`: full log of the entire run.
-   - `errori_conversione.log`: present only if there were errors, with details for each failed file.
+1. Open NX (no part needs to be open beforehand).
+2. Go to **Tools > Journal > Play...**
+3. In the file picker, select `BatchConvertSTEPtoSTL.cs` and confirm.
+4. NX opens the Listing Window automatically and starts processing the STEP files one by one; you'll see `[n/total]` progress lines and an OK/ERROR result for each file.
+5. Let it run until you see the final summary line (`Completato: X riusciti, Y falliti su Z totali.`). Do not close NX while it's running.
+6. When it's done, check the output folder:
+   - The converted `.stl` files, one per source STEP file, same base name.
+   - `log_conversione.txt`: full run log, always written.
+   - `errori_conversione.log`: only present if at least one file failed, with one line per failure (timestamp, file path, error message).
 
-**Tip:** before running the conversion on a large batch, test the script on 2-3 files first to make sure the tolerances and settings give the expected result.
+**Tip:** before running the conversion on a large batch, copy 2-3 STEP files into the input folder and run the journal on those first, to confirm tolerances, folder paths and `onlySolidBodies` give the expected result. Once confirmed, add the rest of the batch and re-run; already-produced STL files with the same name will simply be overwritten.
+
+**If the journal fails to compile in NX:** double-check that the `.cs` file wasn't altered when copying/pasting (encoding or line-ending issues can break the journal compiler), and that you're running it via **Play...** and not trying to build it as a Visual Studio project.
 
 ## Output at the end of the run
 
