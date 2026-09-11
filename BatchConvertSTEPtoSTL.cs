@@ -261,6 +261,24 @@ public class LauncherForm : Form
         try { FormBorderStyle = value; } catch (Exception) { }
     }
 
+    // Ogni volta che il journal viene rieseguito nella STESSA sessione NX
+    // (Play dopo Play, senza chiudere NX), Windows non libera mai la
+    // "classe finestra" nativa registrata dal tentativo precedente: quando
+    // WinForms prova a registrarla di nuovo per la nuova esecuzione, trova
+    // che esiste gia' e ShowDialog() fallisce con un Win32Exception
+    // ("La classe esiste gia'"). Dando alla classe un nome univoco (con un
+    // GUID) ad ogni esecuzione, la registrazione non collide mai con quelle
+    // di run precedenti rimaste appese nel processo NX.
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            CreateParams cp = base.CreateParams;
+            cp.ClassName = "NXBatchLauncherForm_" + Guid.NewGuid().ToString("N");
+            return cp;
+        }
+    }
+
     private void BuildConfigPanel(string initialInputFolder, string initialOutputFolder)
     {
         panelConfig = new Panel();
