@@ -1,39 +1,60 @@
 // =============================================================================
-// NX Open Journal - Conversione massiva STEP -> STL (v8)
+// NX Open Journal - Conversione massiva STEP -> STL (v9)
 // Basato sul journal originale "journal.cs" (export singolo STL registrato in NX),
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
-// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v8):
-// - FIX: se due STEP diversi contengono un componente con lo STESSO NOME (es.
-//   una stessa vite generica usata in due assiemi indipendenti), il secondo
-//   veniva silenziosamente SALTATO dalla protezione anti-sovrascrittura,
-//   perche' il nome file era basato solo sul nome del componente. Ora viene
-//   tenuta traccia di quale STEP ha "registrato per primo" ogni nome di
-//   componente (tramite l'indice persistente); se lo stesso nome ricompare
-//   sotto uno STEP diverso, il nuovo file viene disambiguato con il prefisso
-//   dello STEP di origine (es. "AssiemeB_Vite.stl") ed e' loggato un avviso
-//   esplicito. I nomi restano semplici come prima nel caso comune (nessuna
-//   collisione).
-// - FIX: un componente che ha SIA sotto-componenti (figli) SIA corpi propri
-//   (caso raro ma possibile: un sotto-assieme con lavorazioni/geometria
-//   aggiuntiva applicata direttamente su di esso) veniva trattato come "non
-//   foglia" e i suoi corpi propri venivano ignorati del tutto, in silenzio.
-//   Ora, dopo aver sceso nei figli, i corpi propri del componente (se
-//   presenti) vengono comunque raccolti ed esportati.
-// - FIX: STLCreator.Destroy() ora e' in un blocco finally, cosi' se
-//   STLCreator.Commit() lancia un'eccezione la risorsa NX viene comunque
-//   rilasciata invece di restare aperta per il resto del batch.
-// - FIX: il log su file viene ora scritto in modo incrementale (una riga alla
-//   volta, in append) invece che solo alla fine dell'esecuzione. Se NX si
-//   blocca o il journal viene interrotto a meta' di un batch lungo, il log
-//   fino a quel punto resta comunque leggibile su disco.
-// - FIX: le righe di log per i file NON sovrascritti (gia' esistenti) ora
-//   iniziano esplicitamente con "SKIP", per distinguerle a colpo d'occhio da
-//   OK/ERRORE (anche se il testo descrittivo resta invariato).
-// - MIGLIORATA: CleanUpFacetedFacesAndEdges() non viene piu' chiamata dopo
-//   OGNI singolo corpo esportato, ma una sola volta dopo aver esportato tutti
-//   i corpi di un gruppo (una parte o un componente), riducendo le chiamate
-//   ripetute su parti con molti corpi.
+// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v9):
+// - NUOVO: il journal ora si apre con una GUI (WinForms) come vero punto di
+//   ingresso: alla riproduzione (Tools > Journal > Play) appare subito una
+//   finestra con le cartelle di input/output (modificabili con pulsanti
+//   "Sfoglia", precompilate con i valori di default configurati sotto) e un
+//   pulsante "Avvia scansione". Non serve piu' modificare il file .cs a mano
+//   per il caso comune di cartelle diverse da quelle di default.
+// - NUOVO: scansione preventiva (PreScanConflicts), SENZA aprire alcuna parte
+//   NX: confronta i file STEP nella cartella di input con quanto gia'
+//   presente nella cartella di output (sia nella vecchia convenzione
+//   "piatta" v8, sia nella nuova convenzione "raggruppata" v9 - vedi sotto),
+//   usando l'indice persistente component_index.txt per gli assiemi gia'
+//   noti. Il risultato viene mostrato in una finestra con una lista (una
+//   riga per file STEP: Nuovo / OK / CONFLITTO) e un riepilogo numerico.
+// - NUOVO: dopo la scansione, l'utente fa UNA scelta valida per l'intero
+//   batch (non piu' un semplice skip silenzioso come in v8):
+//     - "Interrompi": esce senza scrivere alcun file.
+//     - "Sovrascrivi": procede esattamente come oggi, ma i file gia'
+//       esistenti (i conflitti rilevati dalla scansione) vengono
+//       sovrascritti invece di essere saltati.
+//     - "Copia in nuova cartella": l'INTERO output di questo run (non solo i
+//       file in conflitto) viene scritto in una sottocartella generata
+//       automaticamente con timestamp (es. "Export_2026-09-11_143000"),
+//       lasciando la cartella di output configurata completamente intatta.
+//       Questa nuova cartella riparte con un proprio component_index.txt
+//       vuoto (run indipendente, nessuna storia ereditata).
+//   Una collisione TRA DUE file prodotti nello stesso run (non contro output
+//   di run precedenti) viene invece sempre segnalata e saltata, in qualunque
+//   modalita', per non sovrascrivere mai silenziosamente un file appena
+//   scritto in questo stesso batch.
+// - NUOVO: raggruppamento automatico dell'output. Quando una sorgente (uno
+//   STEP con corpi diretti, oppure un singolo componente di un assieme)
+//   produce PIU' DI UN file totale (corpi solidi + corpi non chiusi
+//   sommati), tutti i suoi file finiscono in una sottocartella dedicata
+//   (es. "PartXYZ\"); i corpi non chiusi, quando la sorgente e' raggruppata,
+//   finiscono ulteriormente annidati in una sotto-sottocartella
+//   "000_Not_Closed_Mesh" dentro quella dedicata. Quando la sorgente produce
+//   un solo file totale, il comportamento resta piatto esattamente come
+//   nelle versioni precedenti (nessuna sottocartella).
+//
+// COSA ERA GIA' PRESENTE IN v8:
+// - FIX: collisioni di naming tra STEP diversi con un componente omonimo
+//   vengono disambiguate con un prefisso, invece di essere saltate in
+//   silenzio dalla protezione anti-sovrascrittura.
+// - FIX: un componente con sia sotto-componenti sia corpi propri esporta
+//   anche i corpi propri, invece di essere trattato come puro contenitore.
+// - FIX: risorse NX (STLCreator, PartLoadStatus) rilasciate in blocchi
+//   finally anche in caso di errore.
+// - FIX: log scritto in modo incrementale (append riga per riga) invece che
+//   solo a fine esecuzione.
+// - MIGLIORATA: CleanUpFacetedFacesAndEdges() chiamata una sola volta per
+//   gruppo di corpi esportati, non per ogni singolo corpo.
 //
 // COSA ERA GIA' PRESENTE IN v7:
 // - NUOVO: se lo stesso componente compare piu' volte nell'assieme (es. 4 viti
@@ -81,41 +102,374 @@
 //   LINQ, log sempre scritto su file anche in caso di errore.
 //
 // ISTRUZIONI D'USO:
-// 1. Le due cartelle sono gia' impostate:
-//    Input:  C:\Users\AndreaScalenghe\Desktop\STEP_Convert
-//    Output: C:\Users\AndreaScalenghe\Desktop\STL_Convert
-// 2. In NX: Strumenti > Automazione > Journal > Riproduci... e seleziona questo file .cs.
-// 3. Per ogni file .stp/.step:
-//    - i corpi solidi diretti vengono esportati in STL_Convert, un file per corpo;
-//    - i corpi NON solidi (superfici aperte) diretti vengono esportati in
-//      STL_Convert\000_Not_Closed_Mesh, un file per corpo, con suffisso
-//      "_NOT_CLOSED_MESH";
+// 1. In NX: Strumenti > Automazione > Journal > Riproduci... e seleziona
+//    questo file .cs. Si apre subito una finestra: verifica o modifica le
+//    cartelle di input (file STEP) e output (file STL) - di default sono
+//    quelle configurate qui sotto - poi premi "Avvia scansione".
+// 2. La scansione confronta (senza aprire alcuna parte NX) cosa produrrebbe
+//    il batch con quanto gia' presente nella cartella di output, e mostra un
+//    riepilogo con una lista (Nuovo / OK / CONFLITTO per ogni file STEP).
+// 3. Scegli come procedere: "Interrompi" (esce, nessun file scritto),
+//    "Sovrascrivi" (procede, i conflitti rilevati vengono sovrascritti), o
+//    "Copia in nuova cartella" (tutto l'output di questo run va in una nuova
+//    sottocartella con timestamp, la cartella originale resta intatta).
+// 4. Per ogni file .stp/.step:
+//    - i corpi solidi diretti vengono esportati, un file per corpo;
+//    - i corpi NON solidi (superfici aperte) diretti vengono esportati con
+//      suffisso "_NOT_CLOSED_MESH";
+//    - se una sorgente (lo STEP stesso, o un singolo componente di un
+//      assieme) produce PIU' DI UN file totale (solidi + non chiusi), tutti
+//      i suoi file vengono raggruppati in una sottocartella dedicata (i non
+//      chiusi in una sotto-sottocartella "000_Not_Closed_Mesh" al suo
+//      interno); se produce un solo file, resta piatto come prima;
 //    - se non c'e' NESSUN corpo diretto (ne' solido ne' aperto) ed e' un
 //      assieme, lo script scende nei sotto-componenti (o riapre i .prt gia'
-//      noti dall'indice) e applica la stessa logica solido/non chiuso per
-//      ciascun componente, esportando ogni occorrenza separatamente se il
-//      componente e' usato piu' volte.
-// 4. Il progresso viene stampato nella Listing Window di NX. Log dettagliato in
+//      noti dall'indice) e applica la stessa logica per ciascun componente,
+//      esportando ogni occorrenza separatamente se il componente e' usato
+//      piu' volte.
+// 5. Il progresso viene stampato nella Listing Window di NX. Log dettagliato in
 //    "log_conversione.txt", errori in "errori_conversione.log", mappa
-//    step->componenti in "component_index.txt" (tutti dentro STL_Convert).
-// 5. Prova PRIMA su 2-3 file soli in STEP_Convert (includendo se possibile un
-//    assieme con un componente ripetuto piu' volte, e/o una parte con corpi
-//    multi-lump), poi lancia sul totale.
+//    step->componenti in "component_index.txt" (tutti dentro la cartella di
+//    output effettiva di questo run).
+// 6. Prova PRIMA su 2-3 file soli (includendo se possibile un assieme con un
+//    componente ripetuto piu' volte, una parte con piu' corpi solidi, e/o
+//    corpi multi-lump), poi lancia sul totale.
 // =============================================================================
 
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
+using System.Windows.Forms;
 using NXOpen;
 using NXOpen.Assemblies;
+
+public enum BatchDecision { Stop, Overwrite, CopyToNewFolder }
+
+// Riga di riepilogo della scansione preventiva, per un singolo file STEP.
+internal class ScanRow
+{
+    public string StepBaseName;
+    public string Status;   // "Nuovo" / "OK" / "CONFLITTO"
+    public string Detail;   // percorsi in collisione (se CONFLITTO), vuoto altrimenti
+}
+
+// Risultato completo della scansione preventiva su tutta la cartella di input.
+internal class ScanSummary
+{
+    public int TotalSteps;
+    public int NewCount;
+    public int NoConflictCount;
+    public int ConflictCount;
+    public List<ScanRow> Rows = new List<ScanRow>();
+}
+
+// Finestra unica (due schermate) che funge da punto di ingresso del journal:
+// prima la configurazione delle cartelle e l'avvio della scansione, poi il
+// riepilogo dei risultati e la scelta di come procedere.
+public class LauncherForm : Form
+{
+    public string ResultInputFolder;
+    public string ResultOutputFolder;
+    public BatchDecision ChosenDecision = BatchDecision.Stop;
+
+    private Panel panelConfig;
+    private TextBox txtInputFolder;
+    private TextBox txtOutputFolder;
+    private Button btnBrowseInput;
+    private Button btnBrowseOutput;
+    private Button btnScan;
+
+    private Panel panelResults;
+    private Label lblSummary;
+    private ListView lvResults;
+    private Button btnBack;
+    private Button btnStop;
+    private Button btnOverwrite;
+    private Button btnCopy;
+
+    public LauncherForm(string initialInputFolder, string initialOutputFolder)
+    {
+        Text = "Conversione batch STEP -> STL";
+        Width = 720;
+        Height = 500;
+        StartPosition = FormStartPosition.CenterScreen;
+        MinimizeBox = false;
+        MaximizeBox = false;
+        FormBorderStyle = FormBorderStyle.FixedDialog;
+
+        BuildConfigPanel(initialInputFolder, initialOutputFolder);
+        BuildResultsPanel();
+
+        Controls.Add(panelResults);
+        Controls.Add(panelConfig);
+
+        ShowConfigScreen();
+    }
+
+    private void BuildConfigPanel(string initialInputFolder, string initialOutputFolder)
+    {
+        panelConfig = new Panel();
+        panelConfig.Dock = DockStyle.Fill;
+
+        Label lblTitle = new Label();
+        lblTitle.Text = "Conversione batch STEP -> STL";
+        lblTitle.Font = new Font(this.Font.FontFamily, 14, FontStyle.Bold);
+        lblTitle.SetBounds(20, 16, 660, 30);
+
+        Label lblIn = new Label();
+        lblIn.Text = "Cartella di input (file STEP):";
+        lblIn.SetBounds(20, 70, 660, 20);
+
+        txtInputFolder = new TextBox();
+        txtInputFolder.Text = initialInputFolder;
+        txtInputFolder.SetBounds(20, 92, 560, 24);
+
+        btnBrowseInput = new Button();
+        btnBrowseInput.Text = "Sfoglia...";
+        btnBrowseInput.SetBounds(590, 91, 90, 26);
+        btnBrowseInput.Click += BtnBrowseInput_Click;
+
+        Label lblOut = new Label();
+        lblOut.Text = "Cartella di output (file STL):";
+        lblOut.SetBounds(20, 132, 660, 20);
+
+        txtOutputFolder = new TextBox();
+        txtOutputFolder.Text = initialOutputFolder;
+        txtOutputFolder.SetBounds(20, 154, 560, 24);
+
+        btnBrowseOutput = new Button();
+        btnBrowseOutput.Text = "Sfoglia...";
+        btnBrowseOutput.SetBounds(590, 153, 90, 26);
+        btnBrowseOutput.Click += BtnBrowseOutput_Click;
+
+        Label lblInfo = new Label();
+        lblInfo.Text =
+            "La scansione confronta i file STEP nella cartella di input con gli STL gia' presenti\n" +
+            "nella cartella di output, senza aprire alcuna parte in NX e senza modificare nulla,\n" +
+            "cosi' puoi scegliere come procedere prima di avviare la conversione vera e propria.";
+        lblInfo.SetBounds(20, 196, 660, 54);
+
+        btnScan = new Button();
+        btnScan.Text = "Avvia scansione";
+        btnScan.SetBounds(20, 264, 160, 32);
+        btnScan.Click += BtnScan_Click;
+
+        panelConfig.Controls.Add(lblTitle);
+        panelConfig.Controls.Add(lblIn);
+        panelConfig.Controls.Add(txtInputFolder);
+        panelConfig.Controls.Add(btnBrowseInput);
+        panelConfig.Controls.Add(lblOut);
+        panelConfig.Controls.Add(txtOutputFolder);
+        panelConfig.Controls.Add(btnBrowseOutput);
+        panelConfig.Controls.Add(lblInfo);
+        panelConfig.Controls.Add(btnScan);
+    }
+
+    private void BuildResultsPanel()
+    {
+        panelResults = new Panel();
+        panelResults.Dock = DockStyle.Fill;
+
+        lblSummary = new Label();
+        lblSummary.SetBounds(20, 16, 660, 70);
+
+        lvResults = new ListView();
+        lvResults.View = System.Windows.Forms.View.Details;
+        lvResults.FullRowSelect = true;
+        lvResults.SetBounds(20, 96, 660, 270);
+        lvResults.Columns.Add("File STEP", 220);
+        lvResults.Columns.Add("Stato", 110);
+        lvResults.Columns.Add("Dettagli", 320);
+
+        btnBack = new Button();
+        btnBack.Text = "Torna indietro";
+        btnBack.SetBounds(20, 400, 130, 32);
+        btnBack.Click += BtnBack_Click;
+
+        btnStop = new Button();
+        btnStop.Text = "Interrompi";
+        btnStop.SetBounds(300, 400, 110, 32);
+        btnStop.Click += BtnStop_Click;
+
+        btnOverwrite = new Button();
+        btnOverwrite.Text = "Sovrascrivi";
+        btnOverwrite.SetBounds(420, 400, 110, 32);
+        btnOverwrite.Click += BtnOverwrite_Click;
+
+        btnCopy = new Button();
+        btnCopy.Text = "Copia in nuova cartella";
+        btnCopy.SetBounds(540, 400, 140, 32);
+        btnCopy.Click += BtnCopy_Click;
+
+        panelResults.Controls.Add(lblSummary);
+        panelResults.Controls.Add(lvResults);
+        panelResults.Controls.Add(btnBack);
+        panelResults.Controls.Add(btnStop);
+        panelResults.Controls.Add(btnOverwrite);
+        panelResults.Controls.Add(btnCopy);
+    }
+
+    private void BtnBrowseInput_Click(object sender, EventArgs e)
+    {
+        BrowseFolder(txtInputFolder);
+    }
+
+    private void BtnBrowseOutput_Click(object sender, EventArgs e)
+    {
+        BrowseFolder(txtOutputFolder);
+    }
+
+    private void BrowseFolder(TextBox target)
+    {
+        using (FolderBrowserDialog dlg = new FolderBrowserDialog())
+        {
+            if (Directory.Exists(target.Text))
+            {
+                dlg.SelectedPath = target.Text;
+            }
+            if (dlg.ShowDialog(this) == DialogResult.OK)
+            {
+                target.Text = dlg.SelectedPath;
+            }
+        }
+    }
+
+    private void BtnScan_Click(object sender, EventArgs e)
+    {
+        string inputFolderToScan = txtInputFolder.Text.Trim();
+        string outputFolderToScan = txtOutputFolder.Text.Trim();
+
+        if (!Directory.Exists(inputFolderToScan))
+        {
+            MessageBox.Show(this, "La cartella di input non esiste:\n" + inputFolderToScan,
+                "Cartella non trovata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        if (!Directory.Exists(outputFolderToScan))
+        {
+            try
+            {
+                Directory.CreateDirectory(outputFolderToScan);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "Impossibile creare la cartella di output:\n" + ex.Message,
+                    "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+        }
+
+        ScanSummary summary;
+        try
+        {
+            summary = NXJournal.PreScanConflicts(inputFolderToScan, outputFolderToScan);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, "Errore durante la scansione:\n" + ex.Message,
+                "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        ResultInputFolder = inputFolderToScan;
+        ResultOutputFolder = outputFolderToScan;
+        PopulateResults(summary);
+        ShowResultsScreen();
+    }
+
+    private void PopulateResults(ScanSummary summary)
+    {
+        lblSummary.Text = string.Format(
+            "Trovati {0} file STEP: {1} nuovi, {2} senza conflitti noti, {3} con conflitti rilevati.\n" +
+            "Nota: le sorgenti (STEP o singoli componenti) che generano piu' di un file totale (corpi\n" +
+            "solidi + superfici aperte) verranno raggruppate in una sottocartella dedicata; le superfici\n" +
+            "aperte finiranno in una sotto-sottocartella \"{4}\".",
+            summary.TotalSteps, summary.NewCount, summary.NoConflictCount, summary.ConflictCount,
+            NXJournal.notClosedSubfolderName);
+
+        lvResults.Items.Clear();
+        foreach (ScanRow row in summary.Rows)
+        {
+            ListViewItem item = new ListViewItem(new string[] { row.StepBaseName, row.Status, row.Detail });
+            lvResults.Items.Add(item);
+        }
+    }
+
+    private void BtnBack_Click(object sender, EventArgs e)
+    {
+        ShowConfigScreen();
+    }
+
+    private void BtnStop_Click(object sender, EventArgs e)
+    {
+        FinishWith(BatchDecision.Stop);
+    }
+
+    private void BtnOverwrite_Click(object sender, EventArgs e)
+    {
+        FinishWith(BatchDecision.Overwrite);
+    }
+
+    private void BtnCopy_Click(object sender, EventArgs e)
+    {
+        FinishWith(BatchDecision.CopyToNewFolder);
+    }
+
+    private void FinishWith(BatchDecision decision)
+    {
+        ChosenDecision = decision;
+        ResultInputFolder = txtInputFolder.Text.Trim();
+        ResultOutputFolder = txtOutputFolder.Text.Trim();
+        DialogResult = DialogResult.OK;
+        Close();
+    }
+
+    private void ShowConfigScreen()
+    {
+        panelResults.Visible = false;
+        panelConfig.Visible = true;
+    }
+
+    private void ShowResultsScreen()
+    {
+        panelConfig.Visible = false;
+        panelResults.Visible = true;
+    }
+
+    // Chiusura della finestra (es. [X], Alt+F4) senza aver premuto nessuno dei
+    // pulsanti di decisione equivale sempre a "Interrompi" (default sicuro).
+    protected override void OnFormClosing(FormClosingEventArgs e)
+    {
+        if (DialogResult != DialogResult.OK)
+        {
+            ChosenDecision = BatchDecision.Stop;
+        }
+        base.OnFormClosing(e);
+    }
+}
 
 public class NXJournal
 {
     // =========================================================================
-    // CONFIGURAZIONE
+    // CONFIGURAZIONE (valori di default: modificabili anche dalla GUI ad ogni
+    // esecuzione, senza dover editare questo file)
     // =========================================================================
-    private static readonly string inputFolder  = @"C:\Users\AndreaScalenghe\Desktop\STEP_Convert";
-    private static readonly string outputFolder = @"C:\Users\AndreaScalenghe\Desktop\STL_Convert";
+    private static string inputFolder = @"C:\Users\AndreaScalenghe\Desktop\STEP_Convert";
+
+    // Cartella di output COME CONFIGURATA dall'utente (default o valore
+    // inserito nella GUI). E' la base su cui viene calcolata "outputFolder",
+    // la cartella EFFETTIVA di questo run (vedi RunBatch): in modalita'
+    // "Sovrascrivi" coincidono, in modalita' "Copia in nuova cartella"
+    // "outputFolder" diventa una sottocartella con timestamp sotto questa.
+    private static string configuredOutputFolder = @"C:\Users\AndreaScalenghe\Desktop\STL_Convert";
+
+    // Cartella di output EFFETTIVA per il run in corso. Inizializzata uguale
+    // a configuredOutputFolder (cosi' resta sensata anche se l'utente sceglie
+    // "Interrompi" prima che RunBatch la ricalcoli), poi eventualmente
+    // sovrascritta in RunBatch in base alla decisione scelta.
+    private static string outputFolder = configuredOutputFolder;
 
     // Tolleranze STL (riprese identiche dal journal originale)
     private static readonly double chordalTol   = 0.0025;
@@ -127,8 +481,12 @@ public class NXJournal
     // false = i corpi non solidi vengono ignorati
     private static readonly bool exportNotClosedMeshes = true;
 
-    // Nome della sottocartella (dentro outputFolder) dove finiscono i corpi non chiusi
-    private static readonly string notClosedSubfolderName = "000_Not_Closed_Mesh";
+    // Nome della sottocartella dove finiscono i corpi non chiusi: quando la
+    // sorgente non e' raggruppata, e' direttamente dentro la cartella di
+    // output; quando e' raggruppata (vedi ComputeExportFolders), e' annidata
+    // dentro la sottocartella dedicata alla sorgente. Accessibile anche da
+    // LauncherForm per il testo di riepilogo della scansione.
+    internal static readonly string notClosedSubfolderName = "000_Not_Closed_Mesh";
 
     // Suffisso aggiunto al nome file dei corpi non chiusi, per riconoscerli subito
     private static readonly string notClosedSuffix = "_NOT_CLOSED_MESH";
@@ -141,11 +499,20 @@ public class NXJournal
     // Impostarlo a true non ha ancora alcun effetto.
     private static readonly bool trySeparateMultiLumpBodies = false;
 
+    // true = la decisione "Sovrascrivi" scelta dall'utente nella GUI e' attiva
+    // per il run corrente (impostato una volta all'inizio di RunBatch).
+    private static bool allowOverwrite = false;
+
+    // Percorsi assoluti gia' scritti in QUESTO run: usato per non sovrascrivere
+    // mai silenziosamente un file appena prodotto da questo stesso batch,
+    // indipendentemente dalla modalita' Sovrascrivi/Copia scelta.
+    private static HashSet<string> writtenThisRun = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
     private static List<string> logLines = new List<string>();
 
     // Percorso del file di log su cui scrivere in modo INCREMENTALE (una riga
     // alla volta, in append) man mano che l'esecuzione procede. Viene
-    // impostato non appena la cartella di output e' disponibile (vedi
+    // impostato non appena la cartella di output effettiva e' nota (vedi
     // RunBatch); finche' resta null, Log() si limita ad accumulare in memoria
     // e a scrivere nella Listing Window, esattamente come prima.
     private static string logFilePath = null;
@@ -156,11 +523,40 @@ public class NXJournal
         ListingWindow lw = theSession.ListingWindow;
         lw.Open();
 
-        Log(lw, "=== Avvio conversione batch STEP -> STL ===");
+        Log(lw, "=== Avvio conversione batch STEP -> STL (v9) ===");
+
+        BatchDecision decision;
+        string chosenInputFolder;
+        string chosenOutputFolder;
+
+        using (LauncherForm launcher = new LauncherForm(inputFolder, configuredOutputFolder))
+        {
+            launcher.ShowDialog();
+            decision = launcher.ChosenDecision;
+            chosenInputFolder = launcher.ResultInputFolder;
+            chosenOutputFolder = launcher.ResultOutputFolder;
+        }
+
+        if (!string.IsNullOrEmpty(chosenInputFolder))
+        {
+            inputFolder = chosenInputFolder;
+        }
+        if (!string.IsNullOrEmpty(chosenOutputFolder))
+        {
+            configuredOutputFolder = chosenOutputFolder;
+        }
+        outputFolder = configuredOutputFolder;
+
+        if (decision == BatchDecision.Stop)
+        {
+            Log(lw, "Interrotto dall'utente prima di avviare la conversione. Nessun file scritto.");
+            WriteFinalLogSafety();
+            return;
+        }
 
         try
         {
-            RunBatch(theSession, lw);
+            RunBatch(theSession, lw, decision);
         }
         catch (Exception ex)
         {
@@ -169,78 +565,77 @@ public class NXJournal
         }
         finally
         {
-            // Riscrive SEMPRE il log completo su file alla fine (anche se
-            // qualcosa e' andato storto), come rete di sicurezza aggiuntiva
-            // rispetto alla scrittura incrementale che avviene durante il
-            // batch (utile soprattutto se la cartella di output non era
-            // ancora disponibile quando e' partita la scrittura incrementale).
-            try
-            {
-                string logDir = Directory.Exists(outputFolder) ? outputFolder : @"C:\Users\AndreaScalenghe\Desktop";
-                string logFile = Path.Combine(logDir, "log_conversione.txt");
-                File.WriteAllLines(logFile, logLines.ToArray());
-            }
-            catch (Exception)
-            {
-                // se anche questo fallisce non possiamo fare altro
-            }
+            WriteFinalLogSafety();
         }
     }
 
-    private static void RunBatch(Session theSession, ListingWindow lw)
+    // Riscrive SEMPRE il log completo su file alla fine (anche se qualcosa e'
+    // andato storto, o se l'utente ha scelto di interrompere prima di
+    // iniziare), come rete di sicurezza aggiuntiva rispetto alla scrittura
+    // incrementale che avviene durante il batch dentro RunBatch.
+    private static void WriteFinalLogSafety()
+    {
+        try
+        {
+            string logDir = Directory.Exists(outputFolder) ? outputFolder : @"C:\Users\AndreaScalenghe\Desktop";
+            string logFile = Path.Combine(logDir, "log_conversione.txt");
+            File.WriteAllLines(logFile, logLines.ToArray());
+        }
+        catch (Exception)
+        {
+            // se anche questo fallisce non possiamo fare altro
+        }
+    }
+
+    private static void RunBatch(Session theSession, ListingWindow lw, BatchDecision decision)
     {
         if (!Directory.Exists(inputFolder))
         {
             Log(lw, "ERRORE: cartella di input non trovata: " + inputFolder);
             return;
         }
-        if (!Directory.Exists(outputFolder))
-        {
-            Directory.CreateDirectory(outputFolder);
-        }
 
-        // Ora che la cartella di output esiste, si puo' iniziare a scrivere
-        // il log in modo incrementale (vedi Log()). Il file viene azzerato
-        // qui, poi ogni chiamata a Log() vi appende una riga.
+        // Cartella EFFETTIVA di questo run: in modalita' "Copia in nuova
+        // cartella" e' una sottocartella con timestamp sotto quella
+        // configurata (mai toccata), altrimenti coincide con quella
+        // configurata (comportamento identico alle versioni precedenti).
+        outputFolder = (decision == BatchDecision.CopyToNewFolder)
+            ? Path.Combine(configuredOutputFolder, "Export_" + DateTime.Now.ToString("yyyy-MM-dd_HHmmss"))
+            : configuredOutputFolder;
+        EnsureDirectory(outputFolder);
+
+        allowOverwrite = (decision == BatchDecision.Overwrite);
+        writtenThisRun.Clear();
+
+        // Ora che la cartella di output effettiva esiste, si puo' iniziare a
+        // scrivere il log in modo incrementale (vedi Log()). Il file viene
+        // inizializzato con le righe gia' accumulate finora (es. il messaggio
+        // di avvio), poi ogni chiamata a Log() vi appende una riga.
         logFilePath = Path.Combine(outputFolder, "log_conversione.txt");
         try
         {
-            // Scrive subito anche le righe gia' accumulate finora (es. il
-            // messaggio di avvio), cosi' il log su disco parte allineato a
-            // quello in memoria invece di perdere le primissime righe.
             File.WriteAllLines(logFilePath, logLines.ToArray());
         }
         catch (Exception)
         {
             // se non riusciamo nemmeno ad azzerarlo, la scrittura incrementale
             // fallira' silenziosamente riga per riga; resta comunque la
-            // scrittura finale di sicurezza nel finally di Main().
+            // scrittura finale di sicurezza in WriteFinalLogSafety().
+        }
+
+        if (decision == BatchDecision.CopyToNewFolder)
+        {
+            Log(lw, "Modalita' scelta: COPIA IN NUOVA CARTELLA. Tutto l'output di questo run va in: " + outputFolder);
+        }
+        else
+        {
+            Log(lw, "Modalita' scelta: SOVRASCRIVI. Gli output gia' esistenti rilevati dalla scansione verranno sovrascritti.");
         }
 
         string errLogPath = Path.Combine(outputFolder, "errori_conversione.log");
         string indexPath = GetComponentIndexPath();
         Dictionary<string, List<string>> componentIndex = LoadComponentIndex(indexPath);
-
-        // Mappa nome componente -> nome dello STEP che lo ha "registrato" per
-        // primo. Serve a rilevare collisioni di naming quando lo STESSO nome
-        // di componente compare in ASSIEMI DIVERSI (STEP diversi): senza
-        // questo controllo, il secondo assieme troverebbe un file gia'
-        // esistente con quel nome e verrebbe silenziosamente saltato dalla
-        // protezione anti-sovrascrittura. Viene pre-caricata dall'indice
-        // persistente (occorrenze di esecuzioni precedenti) cosi' la
-        // disambiguazione funziona anche tra run diversi, non solo nello
-        // stesso batch.
-        Dictionary<string, string> partNameOwner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (KeyValuePair<string, List<string>> entry in componentIndex)
-        {
-            foreach (string pn in entry.Value)
-            {
-                if (!partNameOwner.ContainsKey(pn))
-                {
-                    partNameOwner[pn] = entry.Key;
-                }
-            }
-        }
+        Dictionary<string, string> partNameOwner = BuildPartNameOwnerMap(componentIndex);
 
         if (componentIndex.Count > 0)
         {
@@ -248,10 +643,7 @@ public class NXJournal
                 componentIndex.Count));
         }
 
-        List<string> stepFiles = new List<string>();
-        stepFiles.AddRange(Directory.GetFiles(inputFolder, "*.stp"));
-        stepFiles.AddRange(Directory.GetFiles(inputFolder, "*.step"));
-        stepFiles.Sort();
+        List<string> stepFiles = GetSortedStepFiles(inputFolder);
 
         Log(lw, string.Format("Trovati {0} file STEP da convertire in: {1}", stepFiles.Count, inputFolder));
         Log(lw, string.Format("Output STL in: {0}", outputFolder));
@@ -405,12 +797,19 @@ public class NXJournal
                 {
                     // Caso normale: corpi presenti direttamente nella parte principale.
                     // Ogni corpo va in un file STL separato, per non fondere corpi
-                    // chiusi distinti in un'unica mesh non piu' separabile.
+                    // chiusi distinti in un'unica mesh non piu' separabile. Se la
+                    // sorgente produce piu' di un file totale, tutto va raggruppato
+                    // in una sottocartella dedicata (vedi ComputeExportFolders).
+                    int effectiveOpenCount = exportNotClosedMeshes ? openBodies.Count : 0;
+                    string solidTargetFolder, openTargetFolder;
+                    ComputeExportFolders(outputFolder, baseName, solidBodies.Count, effectiveOpenCount,
+                        out solidTargetFolder, out openTargetFolder);
+
                     int filesWritten = 0;
 
                     if (solidBodies.Count > 0)
                     {
-                        List<string> outFiles = ExportBodiesSeparately(theSession, lw, solidBodies, outputFolder,
+                        List<string> outFiles = ExportBodiesSeparately(theSession, lw, solidBodies, solidTargetFolder,
                             baseName, ref grandSkippedFiles);
                         filesWritten += outFiles.Count;
                         grandSolidBodies += outFiles.Count;
@@ -418,13 +817,17 @@ public class NXJournal
 
                     if (exportNotClosedMeshes && openBodies.Count > 0)
                     {
-                        string notClosedFolder = GetNotClosedFolder();
-                        List<string> outFilesOpen = ExportBodiesSeparately(theSession, lw, openBodies, notClosedFolder,
+                        List<string> outFilesOpen = ExportBodiesSeparately(theSession, lw, openBodies, openTargetFolder,
                             baseName + notClosedSuffix, ref grandSkippedFiles);
                         filesWritten += outFilesOpen.Count;
                         grandOpenBodies += outFilesOpen.Count;
                         Log(lw, string.Format("  -> Attenzione: {0} corpo/i non chiuso/i (superfici aperte), esportati in {1}\\",
                             openBodies.Count, notClosedSubfolderName));
+                    }
+
+                    if (solidBodies.Count + effectiveOpenCount > 1)
+                    {
+                        Log(lw, string.Format("  -> Output raggruppato in sottocartella: {0}\\", baseName));
                     }
 
                     grandFiles += filesWritten;
@@ -522,6 +925,218 @@ public class NXJournal
         }
     }
 
+    // Elenco ordinato dei file .stp/.step in una cartella. Estratta a parte
+    // cosi' sia RunBatch sia PreScanConflicts usano sempre la stessa identica
+    // enumerazione (mai due implementazioni che potrebbero disallinearsi).
+    private static List<string> GetSortedStepFiles(string folder)
+    {
+        List<string> stepFiles = new List<string>();
+        stepFiles.AddRange(Directory.GetFiles(folder, "*.stp"));
+        stepFiles.AddRange(Directory.GetFiles(folder, "*.step"));
+        stepFiles.Sort();
+        return stepFiles;
+    }
+
+    // Costruisce la mappa nome componente -> nome dello STEP che lo ha
+    // "registrato" per primo, a partire dall'indice persistente gia' caricato.
+    // Estratta a parte cosi' sia RunBatch sia PreScanConflicts partono sempre
+    // dalla stessa logica.
+    private static Dictionary<string, string> BuildPartNameOwnerMap(Dictionary<string, List<string>> componentIndex)
+    {
+        Dictionary<string, string> partNameOwner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (KeyValuePair<string, List<string>> entry in componentIndex)
+        {
+            foreach (string pn in entry.Value)
+            {
+                if (!partNameOwner.ContainsKey(pn))
+                {
+                    partNameOwner[pn] = entry.Key;
+                }
+            }
+        }
+        return partNameOwner;
+    }
+
+    private static void EnsureDirectory(string folder)
+    {
+        if (!Directory.Exists(folder))
+        {
+            Directory.CreateDirectory(folder);
+        }
+    }
+
+    // Decide le cartelle di destinazione per i corpi solidi e per i corpi non
+    // chiusi di UNA sorgente (uno STEP con corpi diretti, o un singolo
+    // componente di un assieme), applicando la regola di raggruppamento:
+    // se il TOTALE dei file che questa sorgente produce (solidi + non chiusi)
+    // e' maggiore di 1, tutto il suo output finisce in una sottocartella
+    // dedicata (baseOutputFolder\fileBaseName\), con i non chiusi ulteriormente
+    // annidati in una sotto-sottocartella (notClosedSubfolderName) al suo
+    // interno. Se il totale e' 1, il comportamento resta piatto come nelle
+    // versioni precedenti: il solido resta direttamente in baseOutputFolder,
+    // oppure l'unico corpo non chiuso resta in baseOutputFolder\000_Not_Closed_Mesh\
+    // (non annidato sotto nessuna sottocartella dedicata).
+    private static void ComputeExportFolders(string baseOutputFolder, string fileBaseName,
+        int solidCount, int openCount, out string solidTargetFolder, out string openTargetFolder)
+    {
+        bool grouped = (solidCount + openCount) > 1;
+        string groupRoot = grouped ? Path.Combine(baseOutputFolder, fileBaseName) : baseOutputFolder;
+        if (grouped)
+        {
+            EnsureDirectory(groupRoot);
+        }
+
+        solidTargetFolder = groupRoot;
+        openTargetFolder = null;
+        if (openCount > 0)
+        {
+            openTargetFolder = Path.Combine(groupRoot, notClosedSubfolderName);
+            EnsureDirectory(openTargetFolder);
+        }
+    }
+
+    // =========================================================================
+    // SCANSIONE PREVENTIVA (nessuna sessione NX coinvolta - solo filesystem e
+    // indice persistente, per restare veloce anche su centinaia di file)
+    // =========================================================================
+
+    // Determina, per ogni file STEP nella cartella di input, se e' "Nuovo"
+    // (nessuna traccia ne' nell'indice ne' su disco - non puo' esserci
+    // conflitto), "OK" (assieme gia' noto, nessun output coincidente
+    // trovato), oppure "CONFLITTO" (esiste gia' almeno un output con lo
+    // stesso nome/percorso previsto). Non apre alcuna parte in NX: per gli
+    // assiemi gia' noti riusa la stessa logica di naming dell'export reale
+    // (ResolveInstanceFileBaseName) contro una copia "scratch" della mappa
+    // dei proprietari dei nomi, cosi' non tocca lo stato che user' il run
+    // vero e proprio.
+    internal static ScanSummary PreScanConflicts(string inputFolderToScan, string outputFolderToScan)
+    {
+        ScanSummary summary = new ScanSummary();
+
+        List<string> stepFiles = GetSortedStepFiles(inputFolderToScan);
+        summary.TotalSteps = stepFiles.Count;
+
+        string indexPath = Path.Combine(outputFolderToScan, "component_index.txt");
+        Dictionary<string, List<string>> componentIndex = LoadComponentIndex(indexPath);
+        Dictionary<string, string> scratchOwner = BuildPartNameOwnerMap(componentIndex);
+
+        foreach (string stepFile in stepFiles)
+        {
+            string baseName = Path.GetFileNameWithoutExtension(stepFile);
+            List<string> knownComponents;
+            bool isKnown = componentIndex.TryGetValue(baseName, out knownComponents) && knownComponents.Count > 0;
+
+            List<string> hits = new List<string>();
+
+            if (isKnown)
+            {
+                Dictionary<string, int> totalPerName = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (string pn in knownComponents)
+                {
+                    if (totalPerName.ContainsKey(pn))
+                    {
+                        totalPerName[pn]++;
+                    }
+                    else
+                    {
+                        totalPerName[pn] = 1;
+                    }
+                }
+
+                Dictionary<string, int> occCounter = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                foreach (string partName in knownComponents)
+                {
+                    int total = totalPerName[partName];
+                    int occ;
+                    if (!occCounter.TryGetValue(partName, out occ))
+                    {
+                        occ = 0;
+                    }
+                    occ++;
+                    occCounter[partName] = occ;
+
+                    bool collision;
+                    string owner;
+                    string fileBaseName = ResolveInstanceFileBaseName(baseName, partName, occ, total, scratchOwner,
+                        out collision, out owner);
+                    hits.AddRange(FindExistingOutputsForBaseName(outputFolderToScan, fileBaseName));
+                }
+            }
+            else
+            {
+                hits.AddRange(FindExistingOutputsForBaseName(outputFolderToScan, baseName));
+            }
+
+            string status;
+            if (hits.Count > 0)
+            {
+                status = "CONFLITTO";
+                summary.ConflictCount++;
+            }
+            else if (isKnown)
+            {
+                status = "OK";
+                summary.NoConflictCount++;
+            }
+            else
+            {
+                status = "Nuovo";
+                summary.NewCount++;
+            }
+
+            summary.Rows.Add(new ScanRow
+            {
+                StepBaseName = baseName,
+                Status = status,
+                Detail = hits.Count > 0 ? string.Join(", ", hits.ToArray()) : ""
+            });
+        }
+
+        return summary;
+    }
+
+    // Verifica se esistono gia' output per "fileBaseName", controllando SIA la
+    // convenzione piatta legacy (v8 e precedenti: file direttamente dentro
+    // outputFolder) SIA quella raggruppata (v9: outputFolder\fileBaseName\...).
+    // Controllare entrambe, sempre, permette di rilevare correttamente anche
+    // gli output prodotti da versioni precedenti di questo journal come
+    // conflitti, senza bisogno di logica speciale aggiuntiva.
+    private static List<string> FindExistingOutputsForBaseName(string outputFolder, string fileBaseName)
+    {
+        List<string> hits = new List<string>();
+
+        hits.AddRange(SafeGlob(outputFolder, fileBaseName + ".stl"));
+        hits.AddRange(SafeGlob(outputFolder, fileBaseName + "_corpo??.stl"));
+        string legacyNotClosed = Path.Combine(outputFolder, notClosedSubfolderName);
+        hits.AddRange(SafeGlob(legacyNotClosed, fileBaseName + notClosedSuffix + "*.stl"));
+
+        string grouped = Path.Combine(outputFolder, fileBaseName);
+        if (Directory.Exists(grouped))
+        {
+            hits.AddRange(SafeGlob(grouped, fileBaseName + "*.stl"));
+            string groupedNotClosed = Path.Combine(grouped, notClosedSubfolderName);
+            hits.AddRange(SafeGlob(groupedNotClosed, fileBaseName + notClosedSuffix + "*.stl"));
+        }
+
+        return hits;
+    }
+
+    private static string[] SafeGlob(string folder, string pattern)
+    {
+        try
+        {
+            if (!Directory.Exists(folder))
+            {
+                return new string[0];
+            }
+            return Directory.GetFiles(folder, pattern);
+        }
+        catch (Exception)
+        {
+            return new string[0];
+        }
+    }
+
     // Costruisce il nome base del file per un componente, in base a quante
     // occorrenze totali ha nell'assieme: se una sola, nome semplice; se piu'
     // di una, aggiunge il suffisso "_occNN" (NN = indice dell'occorrenza).
@@ -535,12 +1150,19 @@ public class NXJournal
     // corrente, per evitare che il file venga scambiato per un duplicato
     // gia' esportato e quindi saltato dalla protezione anti-sovrascrittura.
     // Nel caso comune (nessuna collisione) il nome resta semplice come prima.
-    private static string BuildInstanceFileBaseName(ListingWindow lw, string stepBaseName, string partName,
-        int occurrenceIndex, int totalOccurrences, Dictionary<string, string> partNameOwner)
+    //
+    // Funzione PURA (nessun logging, nessuna dipendenza da ListingWindow):
+    // usata sia dall'export reale (tramite il wrapper BuildInstanceFileBaseName
+    // sotto) sia dalla scansione preventiva, che le passa una mappa "scratch"
+    // separata per non alterare lo stato del run vero e proprio.
+    private static string ResolveInstanceFileBaseName(string stepBaseName, string partName,
+        int occurrenceIndex, int totalOccurrences, Dictionary<string, string> partNameOwner,
+        out bool isCollision, out string previousOwner)
     {
         string owner;
-        bool collision = partNameOwner.TryGetValue(partName, out owner)
+        isCollision = partNameOwner.TryGetValue(partName, out owner)
             && !string.Equals(owner, stepBaseName, StringComparison.OrdinalIgnoreCase);
+        previousOwner = isCollision ? owner : null;
 
         if (!partNameOwner.ContainsKey(partName))
         {
@@ -548,12 +1170,9 @@ public class NXJournal
         }
 
         string effectiveName = partName;
-        if (collision)
+        if (isCollision)
         {
             effectiveName = stepBaseName + "_" + partName;
-            Log(lw, string.Format(
-                "     -> NOTA: il componente \"{0}\" e' gia' stato esportato per l'assieme \"{1}\": per evitare confusione questa occorrenza (da \"{2}\") viene rinominata in \"{3}\".",
-                partName, owner, stepBaseName, effectiveName));
         }
 
         if (totalOccurrences <= 1)
@@ -561,6 +1180,26 @@ public class NXJournal
             return effectiveName;
         }
         return string.Format("{0}_occ{1:00}", effectiveName, occurrenceIndex);
+    }
+
+    // Wrapper con logging attorno a ResolveInstanceFileBaseName, usato dai
+    // percorsi di export reale (RunBatch/ExportComponentTree/ExportComponentPrtDirect).
+    private static string BuildInstanceFileBaseName(ListingWindow lw, string stepBaseName, string partName,
+        int occurrenceIndex, int totalOccurrences, Dictionary<string, string> partNameOwner)
+    {
+        bool collision;
+        string owner;
+        string result = ResolveInstanceFileBaseName(stepBaseName, partName, occurrenceIndex, totalOccurrences,
+            partNameOwner, out collision, out owner);
+
+        if (collision)
+        {
+            Log(lw, string.Format(
+                "     -> NOTA: il componente \"{0}\" e' gia' stato esportato per l'assieme \"{1}\": per evitare confusione questa occorrenza (da \"{2}\") viene rinominata in \"{3}\".",
+                partName, owner, stepBaseName, result));
+        }
+
+        return result;
     }
 
     // Prima passata (sola lettura, nessun export): scorre ricorsivamente
@@ -707,12 +1346,18 @@ public class NXJournal
         {
             // Ogni corpo in un file STL separato, per non fondere corpi chiusi
             // distinti in un'unica mesh non piu' separabile. I corpi non chiusi
-            // (superfici aperte) finiscono nella sottocartella dedicata.
+            // (superfici aperte) finiscono nella sottocartella dedicata, e se il
+            // componente e' raggruppato, ulteriormente annidata al suo interno.
+            int effectiveOpenCount = exportNotClosedMeshes ? compOpenBodies.Count : 0;
+            string solidTargetFolder, openTargetFolder;
+            ComputeExportFolders(outputFolder, fileBaseName, compSolidBodies.Count, effectiveOpenCount,
+                out solidTargetFolder, out openTargetFolder);
+
             int filesWritten = 0;
 
             if (compSolidBodies.Count > 0)
             {
-                List<string> outFiles = ExportBodiesSeparately(theSession, lw, compSolidBodies, outputFolder,
+                List<string> outFiles = ExportBodiesSeparately(theSession, lw, compSolidBodies, solidTargetFolder,
                     fileBaseName, ref grandSkipped);
                 filesWritten += outFiles.Count;
                 grandSolid += outFiles.Count;
@@ -720,8 +1365,7 @@ public class NXJournal
 
             if (exportNotClosedMeshes && compOpenBodies.Count > 0)
             {
-                string notClosedFolder = GetNotClosedFolder();
-                List<string> outFilesOpen = ExportBodiesSeparately(theSession, lw, compOpenBodies, notClosedFolder,
+                List<string> outFilesOpen = ExportBodiesSeparately(theSession, lw, compOpenBodies, openTargetFolder,
                     fileBaseName + notClosedSuffix, ref grandSkipped);
                 filesWritten += outFilesOpen.Count;
                 grandOpen += outFilesOpen.Count;
@@ -731,8 +1375,9 @@ public class NXJournal
             compOk++;
 
             string quantityNote = (total > 1) ? string.Format(" [istanza {0}/{1}]", occ, total) : "";
-            Log(lw, string.Format("     -> componente OK: {0}{1} ({2} solidi, {3} non chiusi, {4} file)",
-                partName, quantityNote, compSolidBodies.Count, compOpenBodies.Count, filesWritten));
+            string groupingNote = (compSolidBodies.Count + effectiveOpenCount > 1) ? " [raggruppato in sottocartella]" : "";
+            Log(lw, string.Format("     -> componente OK: {0}{1}{2} ({3} solidi, {4} non chiusi, {5} file)",
+                partName, quantityNote, groupingNote, compSolidBodies.Count, compOpenBodies.Count, filesWritten));
         }
         catch (Exception ex)
         {
@@ -798,12 +1443,18 @@ public class NXJournal
 
             // Ogni corpo in un file STL separato, per non fondere corpi chiusi
             // distinti in un'unica mesh non piu' separabile. I corpi non chiusi
-            // (superfici aperte) finiscono nella sottocartella dedicata.
+            // (superfici aperte) finiscono nella sottocartella dedicata, e se il
+            // componente e' raggruppato, ulteriormente annidata al suo interno.
+            int effectiveOpenCount = exportNotClosedMeshes ? openBodies.Count : 0;
+            string solidTargetFolder, openTargetFolder;
+            ComputeExportFolders(outputFolder, fileBaseName, solidBodies.Count, effectiveOpenCount,
+                out solidTargetFolder, out openTargetFolder);
+
             int filesWritten = 0;
 
             if (solidBodies.Count > 0)
             {
-                List<string> outFiles = ExportBodiesSeparately(theSession, lw, solidBodies, outputFolder,
+                List<string> outFiles = ExportBodiesSeparately(theSession, lw, solidBodies, solidTargetFolder,
                     fileBaseName, ref grandSkipped);
                 filesWritten += outFiles.Count;
                 grandSolid += outFiles.Count;
@@ -811,8 +1462,7 @@ public class NXJournal
 
             if (exportNotClosedMeshes && openBodies.Count > 0)
             {
-                string notClosedFolder = GetNotClosedFolder();
-                List<string> outFilesOpen = ExportBodiesSeparately(theSession, lw, openBodies, notClosedFolder,
+                List<string> outFilesOpen = ExportBodiesSeparately(theSession, lw, openBodies, openTargetFolder,
                     fileBaseName + notClosedSuffix, ref grandSkipped);
                 filesWritten += outFilesOpen.Count;
                 grandOpen += outFilesOpen.Count;
@@ -942,29 +1592,17 @@ public class NXJournal
         }
     }
 
-    // Restituisce (creandola se non esiste) la sottocartella dedicata alle mesh
-    // non chiuse, dentro la cartella di output principale.
-    private static string GetNotClosedFolder()
-    {
-        string folder = Path.Combine(outputFolder, notClosedSubfolderName);
-        if (!Directory.Exists(folder))
-        {
-            Directory.CreateDirectory(folder);
-        }
-        return folder;
-    }
-
     // Esporta una LISTA di corpi in file STL SEPARATI, uno per corpo, cosi' NX non
     // li fonde in un'unica mesh. Se c'e' un solo corpo, il file si chiama
     // "<baseFileName>.stl" (comportamento identico a prima). Se ce ne sono di
     // piu', ciascuno diventa "<baseFileName>_corpoNN.stl".
-    // PROTEZIONE ANTI-SOVRASCRITTURA: se il file di destinazione esiste gia'
-    // (es. perche' lo STEP e' stato riaperto ed e' stato riprocessato), quel
-    // corpo NON viene esportato e viene loggato un avviso esplicito (prefisso
-    // "SKIP"), invece di sovrascrivere silenziosamente un file gia' presente.
-    // "skippedCount" viene incrementato per ogni file saltato in questo modo.
+    // POLITICA DI SOVRASCRITTURA: se il file di destinazione esiste gia',
+    // TryReserveOutputFile decide cosa fare in base alla modalita' scelta
+    // dall'utente (allowOverwrite) e protegge sempre da collisioni interne
+    // allo stesso run (vedi sotto). "skippedCount" viene incrementato per
+    // ogni file effettivamente saltato.
     // Restituisce la lista dei percorsi file EFFETTIVAMENTE scritti (esclusi
-    // quelli saltati perche' gia' esistenti).
+    // quelli saltati).
     //
     // CleanUpFacetedFacesAndEdges() viene chiamata UNA SOLA VOLTA qui, dopo
     // aver esportato tutti i corpi di questo gruppo, invece che dopo ogni
@@ -982,11 +1620,8 @@ public class NXJournal
         if (bodies.Count == 1)
         {
             string outFile = Path.Combine(outputFolder, baseFileName + ".stl");
-            if (File.Exists(outFile))
+            if (!TryReserveOutputFile(lw, outFile, ref skippedCount))
             {
-                skippedCount++;
-                Log(lw, string.Format("     -> SKIP: \"{0}\" esiste gia' in {1}, NON sovrascritto (corpo saltato).",
-                    Path.GetFileName(outFile), outputFolder));
                 return outputFiles;
             }
             ExportSingleBodyToStl(theSession, bodies[0], outFile);
@@ -998,11 +1633,8 @@ public class NXJournal
         for (int i = 0; i < bodies.Count; i++)
         {
             string outFile = Path.Combine(outputFolder, string.Format("{0}_corpo{1:00}.stl", baseFileName, i + 1));
-            if (File.Exists(outFile))
+            if (!TryReserveOutputFile(lw, outFile, ref skippedCount))
             {
-                skippedCount++;
-                Log(lw, string.Format("     -> SKIP: \"{0}\" esiste gia' in {1}, NON sovrascritto (corpo saltato).",
-                    Path.GetFileName(outFile), outputFolder));
                 continue;
             }
             ExportSingleBodyToStl(theSession, bodies[i], outFile);
@@ -1015,6 +1647,46 @@ public class NXJournal
         }
 
         return outputFiles;
+    }
+
+    // Decide se un file di output puo' essere scritto in "outFile":
+    // - se e' gia' stato scritto IN QUESTO STESSO RUN (writtenThisRun), e'
+    //   una collisione interna tra due sorgenti diverse: viene sempre
+    //   saltata con avviso, indipendentemente dalla modalita' scelta, per
+    //   non sovrascrivere mai silenziosamente un file appena prodotto da
+    //   questo batch.
+    // - altrimenti, se esiste gia' da un run PRECEDENTE: viene sovrascritto
+    //   solo se l'utente ha scelto "Sovrascrivi" (allowOverwrite); altrimenti
+    //   saltato con log "SKIP", esattamente come in v8.
+    // In ogni caso in cui l'export procede, il percorso viene registrato in
+    // writtenThisRun.
+    private static bool TryReserveOutputFile(ListingWindow lw, string outFile, ref int skippedCount)
+    {
+        if (File.Exists(outFile))
+        {
+            if (writtenThisRun.Contains(outFile))
+            {
+                skippedCount++;
+                Log(lw, string.Format(
+                    "     -> ATTENZIONE: collisione interna in questo stesso run per \"{0}\": corpo saltato per non sovrascrivere un file appena scritto.",
+                    Path.GetFileName(outFile)));
+                return false;
+            }
+
+            if (!allowOverwrite)
+            {
+                skippedCount++;
+                Log(lw, string.Format("     -> SKIP: \"{0}\" esiste gia' in {1}, NON sovrascritto (corpo saltato).",
+                    Path.GetFileName(outFile), Path.GetDirectoryName(outFile)));
+                return false;
+            }
+
+            Log(lw, string.Format("     -> OVERWRITE: \"{0}\" gia' esistente in {1}, sovrascritto (scelta dell'utente).",
+                Path.GetFileName(outFile), Path.GetDirectoryName(outFile)));
+        }
+
+        writtenThisRun.Add(outFile);
+        return true;
     }
 
     // Esporta UN SOLO corpo in un file STL dedicato.
@@ -1076,10 +1748,10 @@ public class NXJournal
         }
 
         // Scrittura incrementale: se il percorso del log e' gia' noto (la
-        // cartella di output esiste), appendo subito questa riga su disco,
-        // cosi' il log resta leggibile anche se il journal viene interrotto
-        // a meta' (crash di NX, chiusura forzata, ecc.) e non si arriva mai
-        // alla scrittura finale nel finally di Main().
+        // cartella di output effettiva esiste), appendo subito questa riga su
+        // disco, cosi' il log resta leggibile anche se il journal viene
+        // interrotto a meta' (crash di NX, chiusura forzata, ecc.) e non si
+        // arriva mai alla scrittura finale in WriteFinalLogSafety().
         if (logFilePath != null)
         {
             try
