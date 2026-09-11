@@ -1,9 +1,41 @@
 // =============================================================================
-// NX Open Journal - Conversione massiva STEP -> STL (v7)
+// NX Open Journal - Conversione massiva STEP -> STL (v8)
 // Basato sul journal originale "journal.cs" (export singolo STL registrato in NX),
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
-// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v7):
+// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v8):
+// - FIX: se due STEP diversi contengono un componente con lo STESSO NOME (es.
+//   una stessa vite generica usata in due assiemi indipendenti), il secondo
+//   veniva silenziosamente SALTATO dalla protezione anti-sovrascrittura,
+//   perche' il nome file era basato solo sul nome del componente. Ora viene
+//   tenuta traccia di quale STEP ha "registrato per primo" ogni nome di
+//   componente (tramite l'indice persistente); se lo stesso nome ricompare
+//   sotto uno STEP diverso, il nuovo file viene disambiguato con il prefisso
+//   dello STEP di origine (es. "AssiemeB_Vite.stl") ed e' loggato un avviso
+//   esplicito. I nomi restano semplici come prima nel caso comune (nessuna
+//   collisione).
+// - FIX: un componente che ha SIA sotto-componenti (figli) SIA corpi propri
+//   (caso raro ma possibile: un sotto-assieme con lavorazioni/geometria
+//   aggiuntiva applicata direttamente su di esso) veniva trattato come "non
+//   foglia" e i suoi corpi propri venivano ignorati del tutto, in silenzio.
+//   Ora, dopo aver sceso nei figli, i corpi propri del componente (se
+//   presenti) vengono comunque raccolti ed esportati.
+// - FIX: STLCreator.Destroy() ora e' in un blocco finally, cosi' se
+//   STLCreator.Commit() lancia un'eccezione la risorsa NX viene comunque
+//   rilasciata invece di restare aperta per il resto del batch.
+// - FIX: il log su file viene ora scritto in modo incrementale (una riga alla
+//   volta, in append) invece che solo alla fine dell'esecuzione. Se NX si
+//   blocca o il journal viene interrotto a meta' di un batch lungo, il log
+//   fino a quel punto resta comunque leggibile su disco.
+// - FIX: le righe di log per i file NON sovrascritti (gia' esistenti) ora
+//   iniziano esplicitamente con "SKIP", per distinguerle a colpo d'occhio da
+//   OK/ERRORE (anche se il testo descrittivo resta invariato).
+// - MIGLIORATA: CleanUpFacetedFacesAndEdges() non viene piu' chiamata dopo
+//   OGNI singolo corpo esportato, ma una sola volta dopo aver esportato tutti
+//   i corpi di un gruppo (una parte o un componente), riducendo le chiamate
+//   ripetute su parti con molti corpi.
+//
+// COSA ERA GIA' PRESENTE IN v7:
 // - NUOVO: se lo stesso componente compare piu' volte nell'assieme (es. 4 viti
 //   identiche), prima veniva esportato UNA SOLA volta (deduplicato per nome).
 //   Ora viene esportato UNA VOLTA PER OGNI OCCORRENZA: se compare 4 volte,
@@ -111,6 +143,13 @@ public class NXJournal
 
     private static List<string> logLines = new List<string>();
 
+    // Percorso del file di log su cui scrivere in modo INCREMENTALE (una riga
+    // alla volta, in append) man mano che l'esecuzione procede. Viene
+    // impostato non appena la cartella di output e' disponibile (vedi
+    // RunBatch); finche' resta null, Log() si limita ad accumulare in memoria
+    // e a scrivere nella Listing Window, esattamente come prima.
+    private static string logFilePath = null;
+
     public static void Main(string[] args)
     {
         Session theSession = Session.GetSession();
@@ -130,8 +169,11 @@ public class NXJournal
         }
         finally
         {
-            // Scrive sempre il log su file, anche se qualcosa e' andato storto,
-            // cosi' possiamo capire a che punto si e' fermato.
+            // Riscrive SEMPRE il log completo su file alla fine (anche se
+            // qualcosa e' andato storto), come rete di sicurezza aggiuntiva
+            // rispetto alla scrittura incrementale che avviene durante il
+            // batch (utile soprattutto se la cartella di output non era
+            // ancora disponibile quando e' partita la scrittura incrementale).
             try
             {
                 string logDir = Directory.Exists(outputFolder) ? outputFolder : @"C:\Users\AndreaScalenghe\Desktop";
@@ -157,9 +199,48 @@ public class NXJournal
             Directory.CreateDirectory(outputFolder);
         }
 
+        // Ora che la cartella di output esiste, si puo' iniziare a scrivere
+        // il log in modo incrementale (vedi Log()). Il file viene azzerato
+        // qui, poi ogni chiamata a Log() vi appende una riga.
+        logFilePath = Path.Combine(outputFolder, "log_conversione.txt");
+        try
+        {
+            // Scrive subito anche le righe gia' accumulate finora (es. il
+            // messaggio di avvio), cosi' il log su disco parte allineato a
+            // quello in memoria invece di perdere le primissime righe.
+            File.WriteAllLines(logFilePath, logLines.ToArray());
+        }
+        catch (Exception)
+        {
+            // se non riusciamo nemmeno ad azzerarlo, la scrittura incrementale
+            // fallira' silenziosamente riga per riga; resta comunque la
+            // scrittura finale di sicurezza nel finally di Main().
+        }
+
         string errLogPath = Path.Combine(outputFolder, "errori_conversione.log");
         string indexPath = GetComponentIndexPath();
         Dictionary<string, List<string>> componentIndex = LoadComponentIndex(indexPath);
+
+        // Mappa nome componente -> nome dello STEP che lo ha "registrato" per
+        // primo. Serve a rilevare collisioni di naming quando lo STESSO nome
+        // di componente compare in ASSIEMI DIVERSI (STEP diversi): senza
+        // questo controllo, il secondo assieme troverebbe un file gia'
+        // esistente con quel nome e verrebbe silenziosamente saltato dalla
+        // protezione anti-sovrascrittura. Viene pre-caricata dall'indice
+        // persistente (occorrenze di esecuzioni precedenti) cosi' la
+        // disambiguazione funziona anche tra run diversi, non solo nello
+        // stesso batch.
+        Dictionary<string, string> partNameOwner = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (KeyValuePair<string, List<string>> entry in componentIndex)
+        {
+            foreach (string pn in entry.Value)
+            {
+                if (!partNameOwner.ContainsKey(pn))
+                {
+                    partNameOwner[pn] = entry.Key;
+                }
+            }
+        }
 
         if (componentIndex.Count > 0)
         {
@@ -265,7 +346,7 @@ public class NXJournal
                     occ++;
                     occCounter[partName] = occ;
 
-                    string fileBaseName = BuildInstanceFileBaseName(partName, occ, total);
+                    string fileBaseName = BuildInstanceFileBaseName(lw, baseName, partName, occ, total, partNameOwner);
 
                     ExportComponentPrtDirect(theSession, lw, partName, fileBaseName,
                         ref compOk, ref compFailed, errLogPath,
@@ -296,7 +377,7 @@ public class NXJournal
                 PartLoadStatus partLoadStatus1;
                 BasePart basePart1 = theSession.Parts.OpenActiveDisplay(
                     stepFile, DisplayPartOption.AllowAdditional, out partLoadStatus1);
-                partLoadStatus1.Dispose();
+                DisposePartLoadStatus(partLoadStatus1);
 
                 Part workPart = theSession.Parts.Work;
                 theSession.ApplicationSwitchImmediate("UG_APP_MODELING");
@@ -378,7 +459,7 @@ public class NXJournal
                     int compFailedBefore = compFailed;
 
                     ExportComponentTree(theSession, lw, root, totalCounts, exportedSoFar,
-                        ref compOk, ref compFailed, errLogPath, baseName, indexPath,
+                        ref compOk, ref compFailed, errLogPath, baseName, indexPath, partNameOwner,
                         ref grandSolidBodies, ref grandOpenBodies, ref grandFiles, ref grandSkippedFiles);
 
                     int exportedHere = compOk - compOkBefore;
@@ -444,21 +525,57 @@ public class NXJournal
     // Costruisce il nome base del file per un componente, in base a quante
     // occorrenze totali ha nell'assieme: se una sola, nome semplice; se piu'
     // di una, aggiunge il suffisso "_occNN" (NN = indice dell'occorrenza).
-    private static string BuildInstanceFileBaseName(string partName, int occurrenceIndex, int totalOccurrences)
+    //
+    // DISAMBIGUAZIONE TRA STEP DIVERSI: "partNameOwner" tiene traccia di quale
+    // STEP (stepBaseName) ha usato per primo ciascun nome di componente. Se lo
+    // stesso "partName" viene incontrato sotto uno STEP diverso da quello che
+    // lo "possiede", si tratta di una collisione di naming tra assiemi
+    // indipendenti (non della stessa parte ripetuta nello stesso assieme):
+    // in questo caso il nome file viene prefissato con lo stepBaseName
+    // corrente, per evitare che il file venga scambiato per un duplicato
+    // gia' esportato e quindi saltato dalla protezione anti-sovrascrittura.
+    // Nel caso comune (nessuna collisione) il nome resta semplice come prima.
+    private static string BuildInstanceFileBaseName(ListingWindow lw, string stepBaseName, string partName,
+        int occurrenceIndex, int totalOccurrences, Dictionary<string, string> partNameOwner)
     {
+        string owner;
+        bool collision = partNameOwner.TryGetValue(partName, out owner)
+            && !string.Equals(owner, stepBaseName, StringComparison.OrdinalIgnoreCase);
+
+        if (!partNameOwner.ContainsKey(partName))
+        {
+            partNameOwner[partName] = stepBaseName;
+        }
+
+        string effectiveName = partName;
+        if (collision)
+        {
+            effectiveName = stepBaseName + "_" + partName;
+            Log(lw, string.Format(
+                "     -> NOTA: il componente \"{0}\" e' gia' stato esportato per l'assieme \"{1}\": per evitare confusione questa occorrenza (da \"{2}\") viene rinominata in \"{3}\".",
+                partName, owner, stepBaseName, effectiveName));
+        }
+
         if (totalOccurrences <= 1)
         {
-            return partName;
+            return effectiveName;
         }
-        return string.Format("{0}_occ{1:00}", partName, occurrenceIndex);
+        return string.Format("{0}_occ{1:00}", effectiveName, occurrenceIndex);
     }
 
     // Prima passata (sola lettura, nessun export): scorre ricorsivamente
     // l'albero dei componenti e conta quante volte compare ciascun nome di
-    // Part tra i componenti foglia CHE HANNO ALMENO UN CORPO. Serve per sapere
-    // in anticipo la quantita' totale di ogni componente, cosi' la seconda
-    // passata (ExportComponentTree) puo' assegnare correttamente i suffissi
-    // "_occNN" fin dalla prima occorrenza incontrata.
+    // Part tra i componenti CHE HANNO ALMENO UN CORPO PROPRIO. Serve per
+    // sapere in anticipo la quantita' totale di ogni componente, cosi' la
+    // seconda passata (ExportComponentTree) puo' assegnare correttamente i
+    // suffissi "_occNN" fin dalla prima occorrenza incontrata.
+    //
+    // NOTA: un componente puo' avere SIA figli SIA corpi propri (es. un
+    // sotto-assieme con lavorazioni/geometria aggiunta direttamente su di
+    // esso). In quel caso non e' un componente "foglia" in senso stretto, ma
+    // i suoi corpi propri vanno comunque contati: percio' dopo essere sceso
+    // nei figli si prosegue SEMPRE a controllare anche il componente
+    // corrente, invece di fermarsi (return) al solo fatto di avere figli.
     private static void CountLeafOccurrences(Component comp, Dictionary<string, int> counts)
     {
         Component[] children = comp.GetChildren();
@@ -469,7 +586,6 @@ public class NXJournal
             {
                 CountLeafOccurrences(child, counts);
             }
-            return;
         }
 
         Part compPart = comp.Prototype as Part;
@@ -501,17 +617,23 @@ public class NXJournal
     }
 
     // Scorre ricorsivamente l'albero dei componenti a partire da "comp".
-    // Per ogni componente FOGLIA (senza figli) con corpi, esporta un STL
-    // separato per ogni OCCORRENZA (non deduplica piu' per nome: se lo stesso
-    // componente compare 4 volte nell'assieme, viene esportato 4 volte, con
-    // suffisso "_occNN"). Ogni occorrenza trovata viene anche registrata
-    // nell'indice persistente (una riga per occorrenza, senza deduplica),
-    // cosi' alla prossima esecuzione lo script sapra' sia quali componenti
-    // aprire sia in che quantita'.
+    // Per ogni componente con corpi PROPRI, esporta un STL separato per ogni
+    // OCCORRENZA (non deduplica piu' per nome: se lo stesso componente
+    // compare 4 volte nell'assieme, viene esportato 4 volte, con suffisso
+    // "_occNN"). Ogni occorrenza trovata viene anche registrata nell'indice
+    // persistente (una riga per occorrenza, senza deduplica), cosi' alla
+    // prossima esecuzione lo script sapra' sia quali componenti aprire sia in
+    // che quantita'.
+    //
+    // NOTA: un componente puo' avere SIA figli SIA corpi propri (sotto-
+    // assieme con geometria aggiuntiva applicata direttamente su di esso). Si
+    // scende SEMPRE nei figli quando presenti, ma senza fermarsi li': si
+    // controllano comunque anche i corpi propri del componente corrente,
+    // invece di ignorarli in silenzio solo perche' non e' un nodo foglia.
     private static void ExportComponentTree(Session theSession, ListingWindow lw, Component comp,
         Dictionary<string, int> totalCounts, Dictionary<string, int> exportedSoFar,
         ref int compOk, ref int compFailed, string errLogPath,
-        string stepBaseName, string indexPath,
+        string stepBaseName, string indexPath, Dictionary<string, string> partNameOwner,
         ref int grandSolid, ref int grandOpen, ref int grandFiles, ref int grandSkipped)
     {
         Component[] children = comp.GetChildren();
@@ -521,13 +643,15 @@ public class NXJournal
             foreach (Component child in children)
             {
                 ExportComponentTree(theSession, lw, child, totalCounts, exportedSoFar,
-                    ref compOk, ref compFailed, errLogPath, stepBaseName, indexPath,
+                    ref compOk, ref compFailed, errLogPath, stepBaseName, indexPath, partNameOwner,
                     ref grandSolid, ref grandOpen, ref grandFiles, ref grandSkipped);
             }
-            return;
         }
 
-        // Componente foglia: prendo la Part reale (prototype) gia' caricata in sessione.
+        // Prendo la Part reale (prototype) gia' caricata in sessione, per
+        // controllare se questo componente ha anche corpi propri (che si
+        // tratti di un vero nodo foglia o di un sotto-assieme con geometria
+        // propria in aggiunta ai figli).
         Part compPart = comp.Prototype as Part;
         if (compPart == null)
         {
@@ -569,7 +693,7 @@ public class NXJournal
         occ++;
         exportedSoFar[partName] = occ;
 
-        string fileBaseName = BuildInstanceFileBaseName(partName, occ, total);
+        string fileBaseName = BuildInstanceFileBaseName(lw, stepBaseName, partName, occ, total, partNameOwner);
 
         // Registro questa occorrenza nell'indice: NX ha comunque generato/usato
         // un .prt per questa Part durante l'apertura dell'assieme, quindi vale la
@@ -643,7 +767,7 @@ public class NXJournal
             PartLoadStatus partLoadStatus1;
             BasePart basePart1 = theSession.Parts.OpenActiveDisplay(
                 prtPath, DisplayPartOption.AllowAdditional, out partLoadStatus1);
-            partLoadStatus1.Dispose();
+            DisposePartLoadStatus(partLoadStatus1);
 
             Part workPart = theSession.Parts.Work;
             theSession.ApplicationSwitchImmediate("UG_APP_MODELING");
@@ -836,11 +960,15 @@ public class NXJournal
     // piu', ciascuno diventa "<baseFileName>_corpoNN.stl".
     // PROTEZIONE ANTI-SOVRASCRITTURA: se il file di destinazione esiste gia'
     // (es. perche' lo STEP e' stato riaperto ed e' stato riprocessato), quel
-    // corpo NON viene esportato e viene loggato un avviso esplicito, invece di
-    // sovrascrivere silenziosamente un file gia' presente. "skippedCount" viene
-    // incrementato per ogni file saltato in questo modo.
+    // corpo NON viene esportato e viene loggato un avviso esplicito (prefisso
+    // "SKIP"), invece di sovrascrivere silenziosamente un file gia' presente.
+    // "skippedCount" viene incrementato per ogni file saltato in questo modo.
     // Restituisce la lista dei percorsi file EFFETTIVAMENTE scritti (esclusi
     // quelli saltati perche' gia' esistenti).
+    //
+    // CleanUpFacetedFacesAndEdges() viene chiamata UNA SOLA VOLTA qui, dopo
+    // aver esportato tutti i corpi di questo gruppo, invece che dopo ogni
+    // singolo corpo: su parti con molti corpi evita chiamate ripetute inutili.
     private static List<string> ExportBodiesSeparately(Session theSession, ListingWindow lw, List<Body> bodies,
         string outputFolder, string baseFileName, ref int skippedCount)
     {
@@ -857,12 +985,13 @@ public class NXJournal
             if (File.Exists(outFile))
             {
                 skippedCount++;
-                Log(lw, string.Format("     -> ATTENZIONE: \"{0}\" esiste gia' in {1}, NON sovrascritto (corpo saltato).",
+                Log(lw, string.Format("     -> SKIP: \"{0}\" esiste gia' in {1}, NON sovrascritto (corpo saltato).",
                     Path.GetFileName(outFile), outputFolder));
                 return outputFiles;
             }
             ExportSingleBodyToStl(theSession, bodies[0], outFile);
             outputFiles.Add(outFile);
+            theSession.CleanUpFacetedFacesAndEdges();
             return outputFiles;
         }
 
@@ -872,7 +1001,7 @@ public class NXJournal
             if (File.Exists(outFile))
             {
                 skippedCount++;
-                Log(lw, string.Format("     -> ATTENZIONE: \"{0}\" esiste gia' in {1}, NON sovrascritto (corpo saltato).",
+                Log(lw, string.Format("     -> SKIP: \"{0}\" esiste gia' in {1}, NON sovrascritto (corpo saltato).",
                     Path.GetFileName(outFile), outputFolder));
                 continue;
             }
@@ -880,26 +1009,57 @@ public class NXJournal
             outputFiles.Add(outFile);
         }
 
+        if (outputFiles.Count > 0)
+        {
+            theSession.CleanUpFacetedFacesAndEdges();
+        }
+
         return outputFiles;
     }
 
     // Esporta UN SOLO corpo in un file STL dedicato.
+    // STLCreator.Destroy() e' in un blocco finally: se Commit() lancia
+    // un'eccezione (es. corpo non valido, path non scrivibile), la risorsa NX
+    // viene comunque rilasciata invece di restare aperta per il resto del batch.
     private static void ExportSingleBodyToStl(Session theSession, Body body, string outputFile)
     {
         STLCreator stlCreator1 = theSession.DexManager.CreateStlCreator();
-        stlCreator1.AutoNormalGen = true;
-        stlCreator1.ChordalTol = chordalTol;
-        stlCreator1.AdjacencyTol = adjacencyTol;
-        stlCreator1.AngularTol = angularTol;
-        stlCreator1.OutputFile = outputFile;
+        try
+        {
+            stlCreator1.AutoNormalGen = true;
+            stlCreator1.ChordalTol = chordalTol;
+            stlCreator1.AdjacencyTol = adjacencyTol;
+            stlCreator1.AngularTol = angularTol;
+            stlCreator1.OutputFile = outputFile;
 
-        NXObject[] singleBodyArray = new NXObject[] { body };
-        stlCreator1.ExportSelectionBlock.Add(singleBodyArray);
+            NXObject[] singleBodyArray = new NXObject[] { body };
+            stlCreator1.ExportSelectionBlock.Add(singleBodyArray);
 
-        stlCreator1.Commit();
-        stlCreator1.Destroy();
+            stlCreator1.Commit();
+        }
+        finally
+        {
+            stlCreator1.Destroy();
+        }
+    }
 
-        theSession.CleanUpFacetedFacesAndEdges();
+    // Rilascia in modo sicuro un PartLoadStatus: se Dispose() stesso dovesse
+    // lanciare un'eccezione (o l'oggetto fosse null), non deve mascherare o
+    // interrompere il flusso principale del journal.
+    private static void DisposePartLoadStatus(PartLoadStatus partLoadStatus)
+    {
+        if (partLoadStatus == null)
+        {
+            return;
+        }
+        try
+        {
+            partLoadStatus.Dispose();
+        }
+        catch (Exception)
+        {
+            // ignorato: non e' una risorsa critica da far fallire il resto dell'export
+        }
     }
 
     private static void Log(ListingWindow lw, string message)
@@ -913,6 +1073,24 @@ public class NXJournal
         {
             // se la Listing Window non e' disponibile, continuiamo comunque:
             // il messaggio resta salvato in logLines e finira' nel file di log.
+        }
+
+        // Scrittura incrementale: se il percorso del log e' gia' noto (la
+        // cartella di output esiste), appendo subito questa riga su disco,
+        // cosi' il log resta leggibile anche se il journal viene interrotto
+        // a meta' (crash di NX, chiusura forzata, ecc.) e non si arriva mai
+        // alla scrittura finale nel finally di Main().
+        if (logFilePath != null)
+        {
+            try
+            {
+                File.AppendAllText(logFilePath, message + Environment.NewLine);
+            }
+            catch (Exception)
+            {
+                // se anche l'append fallisce, il messaggio resta comunque in
+                // logLines e verra' ritentato nella scrittura finale.
+            }
         }
     }
 
