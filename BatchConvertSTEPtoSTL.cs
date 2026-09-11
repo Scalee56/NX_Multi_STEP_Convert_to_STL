@@ -163,350 +163,23 @@ internal class ScanSummary
     public List<ScanRow> Rows = new List<ScanRow>();
 }
 
-// Finestra unica (due schermate) che funge da punto di ingresso del journal:
-// prima la configurazione delle cartelle e l'avvio della scansione, poi il
-// riepilogo dei risultati e la scelta di come procedere.
-public class LauncherForm : Form
-{
-    public string ResultInputFolder;
-    public string ResultOutputFolder;
-    public BatchDecision ChosenDecision = BatchDecision.Stop;
-
-    private Panel panelConfig;
-    private TextBox txtInputFolder;
-    private TextBox txtOutputFolder;
-    private Button btnBrowseInput;
-    private Button btnBrowseOutput;
-    private Button btnScan;
-
-    private Panel panelResults;
-    private Label lblSummary;
-    private ListView lvResults;
-    private Button btnBack;
-    private Button btnStop;
-    private Button btnOverwrite;
-    private Button btnCopy;
-
-    public LauncherForm(string initialInputFolder, string initialOutputFolder)
-    {
-        // ATTENZIONE - compatibilita': in alcune installazioni NX la versione
-        // di System.Drawing.Common caricata dal processo non e' compatibile
-        // con quella attesa da System.Windows.Forms. Qualunque proprieta'
-        // della form che internamente richiami Form.UpdateWindowIcon (si e'
-        // visto succedere sia con FormBorderStyle sia con ShowIcon, quindi
-        // non e' una proprieta' specifica il problema, e' strutturale a
-        // quell'ambiente) lancia un MissingMethodException sul costruttore
-        // di System.Drawing.Icon e farebbe fallire l'intero journal PRIMA
-        // ancora che la finestra si apra.
-        //
-        // Fix: ogni proprieta' "cosmetica" e' avvolta nel proprio try/catch
-        // (metodi TrySetXxx sotto). Il try/catch cattura l'eccezione anche se
-        // viene lanciata DENTRO l'implementazione del setter (come in questo
-        // caso), quindi il costruttore prosegue comunque: se una di queste
-        // proprieta' non si puo' impostare in questo ambiente, la finestra
-        // si apre lo stesso (magari con un dettaglio estetico diverso, es.
-        // bordo ridimensionabile invece che fisso) invece di non aprirsi
-        // affatto. Niente riferimenti a System.Drawing.Icon qui: assegnare
-        // esplicitamente quel tipo rischierebbe di reintrodurre l'errore di
-        // compilazione gia' visto con Font/FontStyle su questa installazione
-        // NX (assembly System.Drawing.Common non referenziato di default).
-        Text = "Conversione batch STEP -> STL";
-        Width = 720;
-        Height = 500;
-        TrySetShowIcon(false);
-        TrySetStartPosition(FormStartPosition.CenterScreen);
-        TrySetMinimizeBox(false);
-        TrySetMaximizeBox(false);
-        TrySetFormBorderStyle(FormBorderStyle.FixedDialog);
-
-        BuildConfigPanel(initialInputFolder, initialOutputFolder);
-        BuildResultsPanel();
-
-        Controls.Add(panelResults);
-        Controls.Add(panelConfig);
-
-        ShowConfigScreen();
-    }
-
-    // Helper "best effort" per le proprieta' cosmetiche della form: ciascuno
-    // ignora silenziosamente qualunque eccezione. Servono a proteggere il
-    // costruttore da un ambiente NX dove una o piu' di queste proprieta'
-    // possono lanciare un MissingMethodException legato a un disallineamento
-    // tra le versioni di System.Windows.Forms e System.Drawing.Common
-    // caricate dal processo (vedi commento nel costruttore). Se una di
-    // queste chiamate fallisce, la finestra si apre comunque, al massimo con
-    // un dettaglio estetico diverso da quello previsto.
-    private void TrySetShowIcon(bool value)
-    {
-        try { ShowIcon = value; } catch (Exception) { }
-    }
-
-    private void TrySetStartPosition(FormStartPosition value)
-    {
-        try { StartPosition = value; } catch (Exception) { }
-    }
-
-    private void TrySetMinimizeBox(bool value)
-    {
-        try { MinimizeBox = value; } catch (Exception) { }
-    }
-
-    private void TrySetMaximizeBox(bool value)
-    {
-        try { MaximizeBox = value; } catch (Exception) { }
-    }
-
-    private void TrySetFormBorderStyle(FormBorderStyle value)
-    {
-        try { FormBorderStyle = value; } catch (Exception) { }
-    }
-
-    private void BuildConfigPanel(string initialInputFolder, string initialOutputFolder)
-    {
-        panelConfig = new Panel();
-        panelConfig.Dock = DockStyle.Fill;
-
-        // Niente System.Drawing/Font qui: alcune versioni di NX compilano i
-        // journal su un runtime .NET dove System.Drawing.Common non e' un
-        // riferimento di default, e aggiungerlo esplicitamente non e'
-        // affidabile su tutte le versioni. Il titolo usa quindi il font di
-        // default del controllo, senza personalizzazioni grafiche.
-        Label lblTitle = new Label();
-        lblTitle.Text = "=== Conversione batch STEP -> STL ===";
-        lblTitle.SetBounds(20, 16, 660, 30);
-
-        Label lblIn = new Label();
-        lblIn.Text = "Cartella di input (file STEP):";
-        lblIn.SetBounds(20, 70, 660, 20);
-
-        txtInputFolder = new TextBox();
-        txtInputFolder.Text = initialInputFolder;
-        txtInputFolder.SetBounds(20, 92, 560, 24);
-
-        btnBrowseInput = new Button();
-        btnBrowseInput.Text = "Sfoglia...";
-        btnBrowseInput.SetBounds(590, 91, 90, 26);
-        btnBrowseInput.Click += BtnBrowseInput_Click;
-
-        Label lblOut = new Label();
-        lblOut.Text = "Cartella di output (file STL):";
-        lblOut.SetBounds(20, 132, 660, 20);
-
-        txtOutputFolder = new TextBox();
-        txtOutputFolder.Text = initialOutputFolder;
-        txtOutputFolder.SetBounds(20, 154, 560, 24);
-
-        btnBrowseOutput = new Button();
-        btnBrowseOutput.Text = "Sfoglia...";
-        btnBrowseOutput.SetBounds(590, 153, 90, 26);
-        btnBrowseOutput.Click += BtnBrowseOutput_Click;
-
-        Label lblInfo = new Label();
-        lblInfo.Text =
-            "La scansione confronta i file STEP nella cartella di input con gli STL gia' presenti\n" +
-            "nella cartella di output, senza aprire alcuna parte in NX e senza modificare nulla,\n" +
-            "cosi' puoi scegliere come procedere prima di avviare la conversione vera e propria.";
-        lblInfo.SetBounds(20, 196, 660, 54);
-
-        btnScan = new Button();
-        btnScan.Text = "Avvia scansione";
-        btnScan.SetBounds(20, 264, 160, 32);
-        btnScan.Click += BtnScan_Click;
-
-        panelConfig.Controls.Add(lblTitle);
-        panelConfig.Controls.Add(lblIn);
-        panelConfig.Controls.Add(txtInputFolder);
-        panelConfig.Controls.Add(btnBrowseInput);
-        panelConfig.Controls.Add(lblOut);
-        panelConfig.Controls.Add(txtOutputFolder);
-        panelConfig.Controls.Add(btnBrowseOutput);
-        panelConfig.Controls.Add(lblInfo);
-        panelConfig.Controls.Add(btnScan);
-    }
-
-    private void BuildResultsPanel()
-    {
-        panelResults = new Panel();
-        panelResults.Dock = DockStyle.Fill;
-
-        lblSummary = new Label();
-        lblSummary.SetBounds(20, 16, 660, 70);
-
-        lvResults = new ListView();
-        lvResults.View = System.Windows.Forms.View.Details;
-        lvResults.FullRowSelect = true;
-        lvResults.SetBounds(20, 96, 660, 270);
-        lvResults.Columns.Add("File STEP", 220);
-        lvResults.Columns.Add("Stato", 110);
-        lvResults.Columns.Add("Dettagli", 320);
-
-        btnBack = new Button();
-        btnBack.Text = "Torna indietro";
-        btnBack.SetBounds(20, 400, 130, 32);
-        btnBack.Click += BtnBack_Click;
-
-        btnStop = new Button();
-        btnStop.Text = "Interrompi";
-        btnStop.SetBounds(300, 400, 110, 32);
-        btnStop.Click += BtnStop_Click;
-
-        btnOverwrite = new Button();
-        btnOverwrite.Text = "Sovrascrivi";
-        btnOverwrite.SetBounds(420, 400, 110, 32);
-        btnOverwrite.Click += BtnOverwrite_Click;
-
-        btnCopy = new Button();
-        btnCopy.Text = "Copia in nuova cartella";
-        btnCopy.SetBounds(540, 400, 140, 32);
-        btnCopy.Click += BtnCopy_Click;
-
-        panelResults.Controls.Add(lblSummary);
-        panelResults.Controls.Add(lvResults);
-        panelResults.Controls.Add(btnBack);
-        panelResults.Controls.Add(btnStop);
-        panelResults.Controls.Add(btnOverwrite);
-        panelResults.Controls.Add(btnCopy);
-    }
-
-    private void BtnBrowseInput_Click(object sender, EventArgs e)
-    {
-        BrowseFolder(txtInputFolder);
-    }
-
-    private void BtnBrowseOutput_Click(object sender, EventArgs e)
-    {
-        BrowseFolder(txtOutputFolder);
-    }
-
-    private void BrowseFolder(TextBox target)
-    {
-        using (FolderBrowserDialog dlg = new FolderBrowserDialog())
-        {
-            if (Directory.Exists(target.Text))
-            {
-                dlg.SelectedPath = target.Text;
-            }
-            if (dlg.ShowDialog(this) == DialogResult.OK)
-            {
-                target.Text = dlg.SelectedPath;
-            }
-        }
-    }
-
-    private void BtnScan_Click(object sender, EventArgs e)
-    {
-        string inputFolderToScan = txtInputFolder.Text.Trim();
-        string outputFolderToScan = txtOutputFolder.Text.Trim();
-
-        if (!Directory.Exists(inputFolderToScan))
-        {
-            MessageBox.Show(this, "La cartella di input non esiste:\n" + inputFolderToScan,
-                "Cartella non trovata", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-
-        if (!Directory.Exists(outputFolderToScan))
-        {
-            try
-            {
-                Directory.CreateDirectory(outputFolderToScan);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, "Impossibile creare la cartella di output:\n" + ex.Message,
-                    "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-        }
-
-        ScanSummary summary;
-        try
-        {
-            summary = NXJournal.PreScanConflicts(inputFolderToScan, outputFolderToScan);
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, "Errore durante la scansione:\n" + ex.Message,
-                "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-
-        ResultInputFolder = inputFolderToScan;
-        ResultOutputFolder = outputFolderToScan;
-        PopulateResults(summary);
-        ShowResultsScreen();
-    }
-
-    private void PopulateResults(ScanSummary summary)
-    {
-        lblSummary.Text = string.Format(
-            "Trovati {0} file STEP: {1} nuovi, {2} senza conflitti noti, {3} con conflitti rilevati.\n" +
-            "Nota: le sorgenti (STEP o singoli componenti) che generano piu' di un file totale (corpi\n" +
-            "solidi + superfici aperte) verranno raggruppate in una sottocartella dedicata; le superfici\n" +
-            "aperte finiranno in una sotto-sottocartella \"{4}\".",
-            summary.TotalSteps, summary.NewCount, summary.NoConflictCount, summary.ConflictCount,
-            NXJournal.notClosedSubfolderName);
-
-        lvResults.Items.Clear();
-        foreach (ScanRow row in summary.Rows)
-        {
-            ListViewItem item = new ListViewItem(new string[] { row.StepBaseName, row.Status, row.Detail });
-            lvResults.Items.Add(item);
-        }
-    }
-
-    private void BtnBack_Click(object sender, EventArgs e)
-    {
-        ShowConfigScreen();
-    }
-
-    private void BtnStop_Click(object sender, EventArgs e)
-    {
-        FinishWith(BatchDecision.Stop);
-    }
-
-    private void BtnOverwrite_Click(object sender, EventArgs e)
-    {
-        FinishWith(BatchDecision.Overwrite);
-    }
-
-    private void BtnCopy_Click(object sender, EventArgs e)
-    {
-        FinishWith(BatchDecision.CopyToNewFolder);
-    }
-
-    private void FinishWith(BatchDecision decision)
-    {
-        ChosenDecision = decision;
-        ResultInputFolder = txtInputFolder.Text.Trim();
-        ResultOutputFolder = txtOutputFolder.Text.Trim();
-        DialogResult = DialogResult.OK;
-        Close();
-    }
-
-    private void ShowConfigScreen()
-    {
-        panelResults.Visible = false;
-        panelConfig.Visible = true;
-    }
-
-    private void ShowResultsScreen()
-    {
-        panelConfig.Visible = false;
-        panelResults.Visible = true;
-    }
-
-    // Chiusura della finestra (es. [X], Alt+F4) senza aver premuto nessuno dei
-    // pulsanti di decisione equivale sempre a "Interrompi" (default sicuro).
-    protected override void OnFormClosing(FormClosingEventArgs e)
-    {
-        if (DialogResult != DialogResult.OK)
-        {
-            ChosenDecision = BatchDecision.Stop;
-        }
-        base.OnFormClosing(e);
-    }
-}
+// NOTA STORICA: le versioni precedenti di questo journal usavano qui una
+// System.Windows.Forms.Form personalizzata (finestra di configurazione +
+// scansione + decisione). Su alcune installazioni NX, PERO', qualunque
+// System.Windows.Forms.Form - indipendentemente dalle proprieta' impostate -
+// va in MissingMethodException nel momento in cui la finestra viene
+// effettivamente creata (Form.ShowDialog -> Form.CreateHandle ->
+// Form.UpdateWindowIcon -> System.Drawing.Icon..ctor), a causa di un
+// disallineamento tra le versioni di System.Windows.Forms e
+// System.Drawing.Common caricate dal processo NX. Non e' un problema
+// risolvibile impostando o evitando singole proprieta': e' strutturale a
+// quell'ambiente e riguarda OGNI Form, non solo questa.
+//
+// La configurazione, la scansione e la scelta della modalita' sono quindi
+// implementate in Main() (vedi sotto) usando solo System.Windows.Forms.
+// MessageBox e System.Windows.Forms.FolderBrowserDialog: nessuno dei due e'
+// una Form, entrambi si appoggiano a dialoghi nativi di Windows, e non
+// passano dal codice di Form.UpdateWindowIcon che causa il crash.
 
 public class NXJournal
 {
@@ -542,9 +215,8 @@ public class NXJournal
     // Nome della sottocartella dove finiscono i corpi non chiusi: quando la
     // sorgente non e' raggruppata, e' direttamente dentro la cartella di
     // output; quando e' raggruppata (vedi ComputeExportFolders), e' annidata
-    // dentro la sottocartella dedicata alla sorgente. Accessibile anche da
-    // LauncherForm per il testo di riepilogo della scansione.
-    internal static readonly string notClosedSubfolderName = "000_Not_Closed_Mesh";
+    // dentro la sottocartella dedicata alla sorgente.
+    private static readonly string notClosedSubfolderName = "000_Not_Closed_Mesh";
 
     // Suffisso aggiunto al nome file dei corpi non chiusi, per riconoscerli subito
     private static readonly string notClosedSuffix = "_NOT_CLOSED_MESH";
@@ -583,34 +255,65 @@ public class NXJournal
 
         Log(lw, "=== Avvio conversione batch STEP -> STL (v9) ===");
 
-        BatchDecision decision;
-        string chosenInputFolder;
-        string chosenOutputFolder;
-
-        using (LauncherForm launcher = new LauncherForm(inputFolder, configuredOutputFolder))
+        string chosenInputFolder = AskForFolder("input (i file .stp/.step da convertire)", inputFolder);
+        if (chosenInputFolder == null)
         {
-            launcher.ShowDialog();
-            decision = launcher.ChosenDecision;
-            chosenInputFolder = launcher.ResultInputFolder;
-            chosenOutputFolder = launcher.ResultOutputFolder;
-        }
-
-        if (!string.IsNullOrEmpty(chosenInputFolder))
-        {
-            inputFolder = chosenInputFolder;
-        }
-        if (!string.IsNullOrEmpty(chosenOutputFolder))
-        {
-            configuredOutputFolder = chosenOutputFolder;
-        }
-        outputFolder = configuredOutputFolder;
-
-        if (decision == BatchDecision.Stop)
-        {
-            Log(lw, "Interrotto dall'utente prima di avviare la conversione. Nessun file scritto.");
-            WriteFinalLogSafety();
+            LogStopAndExit(lw, "Interrotto dall'utente durante la scelta della cartella di input. Nessun file scritto.");
             return;
         }
+        inputFolder = chosenInputFolder;
+
+        string chosenOutputFolder = AskForFolder("output (dove finiranno i file .stl)", configuredOutputFolder);
+        if (chosenOutputFolder == null)
+        {
+            LogStopAndExit(lw, "Interrotto dall'utente durante la scelta della cartella di output. Nessun file scritto.");
+            return;
+        }
+        configuredOutputFolder = chosenOutputFolder;
+        outputFolder = configuredOutputFolder;
+
+        if (!Directory.Exists(inputFolder))
+        {
+            MessageBox.Show("La cartella di input non esiste:\n" + inputFolder,
+                "Cartella non trovata", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            LogStopAndExit(lw, "ERRORE: cartella di input non trovata: " + inputFolder);
+            return;
+        }
+        EnsureDirectory(configuredOutputFolder);
+
+        ScanSummary summary;
+        try
+        {
+            summary = PreScanConflicts(inputFolder, configuredOutputFolder);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show("Errore durante la scansione preventiva:\n" + ex.Message,
+                "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            LogStopAndExit(lw, "ERRORE durante la scansione preventiva: " + ex.Message);
+            return;
+        }
+
+        WriteScanSummaryFile(configuredOutputFolder, summary);
+
+        DialogResult proceedResult = MessageBox.Show(
+            BuildScanSummaryMessage(summary) + "\n\nVuoi procedere con la conversione?",
+            "Risultato scansione", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (proceedResult != DialogResult.Yes)
+        {
+            LogStopAndExit(lw, "Interrotto dall'utente dopo la scansione preventiva. Nessun file scritto.");
+            return;
+        }
+
+        DialogResult modeResult = MessageBox.Show(
+            "Come vuoi procedere?\n\n" +
+            "Si' = SOVRASCRIVI i file gia' esistenti (quelli segnalati come CONFLITTO dalla scansione).\n" +
+            "No = COPIA tutto l'output di questo run in una nuova sottocartella con data e ora " +
+            "(la cartella di output configurata non viene toccata).",
+            "Modalita' di esportazione", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        BatchDecision decision = (modeResult == DialogResult.Yes)
+            ? BatchDecision.Overwrite
+            : BatchDecision.CopyToNewFolder;
 
         try
         {
@@ -624,6 +327,133 @@ public class NXJournal
         finally
         {
             WriteFinalLogSafety();
+        }
+    }
+
+    private static void LogStopAndExit(ListingWindow lw, string message)
+    {
+        Log(lw, message);
+        WriteFinalLogSafety();
+    }
+
+    // Chiede all'utente se usare la cartella predefinita ("folderDescription")
+    // o sceglierne un'altra tramite FolderBrowserDialog. Ritorna null se
+    // l'utente sceglie di interrompere in uno dei due passaggi.
+    // FolderBrowserDialog (a differenza di una Form personalizzata) si
+    // appoggia al selettore di cartelle nativo di Windows, quindi non risente
+    // del problema di compatibilita' System.Drawing/System.Windows.Forms che
+    // colpisce Form.ShowDialog su questa installazione NX - ma per sicurezza
+    // e' comunque avvolto in un try/catch: se anche questo dovesse fallire in
+    // qualche ambiente, si ripiega sulla cartella predefinita invece di far
+    // fallire tutto il journal.
+    private static string AskForFolder(string folderDescription, string defaultFolder)
+    {
+        DialogResult useDefault = MessageBox.Show(
+            string.Format("Cartella di {0}:\n{1}\n\nUsare questa cartella?\n(No per sceglierne un'altra, Annulla per interrompere)",
+                folderDescription, defaultFolder),
+            "Conferma cartella", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+
+        if (useDefault == DialogResult.Cancel)
+        {
+            return null;
+        }
+        if (useDefault == DialogResult.Yes)
+        {
+            return defaultFolder;
+        }
+
+        try
+        {
+            using (FolderBrowserDialog dlg = new FolderBrowserDialog())
+            {
+                if (Directory.Exists(defaultFolder))
+                {
+                    dlg.SelectedPath = defaultFolder;
+                }
+                if (dlg.ShowDialog() == DialogResult.OK)
+                {
+                    return dlg.SelectedPath;
+                }
+                return null;
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(
+                "Non e' stato possibile aprire il selettore di cartelle in questo ambiente (" + ex.Message + ").\n" +
+                "Verra' usata la cartella predefinita. Per cambiarla stabilmente, modifica il file .cs.",
+                "Selettore non disponibile", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return defaultFolder;
+        }
+    }
+
+    // Riepilogo condensato per la MessageBox: conteggi piu' un elenco (troncato)
+    // dei file in conflitto. Il dettaglio completo va sempre su file (vedi
+    // WriteScanSummaryFile), per non affidarsi ai limiti pratici di una
+    // MessageBox su batch con molti file.
+    private static string BuildScanSummaryMessage(ScanSummary summary)
+    {
+        string text = string.Format(
+            "Trovati {0} file STEP: {1} nuovi, {2} senza conflitti noti, {3} con conflitti rilevati.",
+            summary.TotalSteps, summary.NewCount, summary.NoConflictCount, summary.ConflictCount);
+
+        List<string> conflictNames = new List<string>();
+        foreach (ScanRow row in summary.Rows)
+        {
+            if (row.Status == "CONFLITTO")
+            {
+                conflictNames.Add(row.StepBaseName);
+            }
+        }
+
+        if (conflictNames.Count > 0)
+        {
+            text += "\n\nFile con output gia' esistente:\n";
+            int shown = 0;
+            foreach (string name in conflictNames)
+            {
+                if (shown >= 15)
+                {
+                    text += string.Format("... e altri {0} (elenco completo in ultima_scansione.txt)", conflictNames.Count - shown);
+                    break;
+                }
+                text += "- " + name + "\n";
+                shown++;
+            }
+        }
+
+        text += "\n\nNota: le sorgenti che generano piu' di un file totale (corpi solidi + superfici\n" +
+                "aperte) verranno raggruppate automaticamente in una sottocartella dedicata.";
+
+        return text;
+    }
+
+    // Scrive SEMPRE il dettaglio completo della scansione su file (anche se
+    // troncato nella MessageBox), cosi' su batch grandi non si perde nulla
+    // solo perche' non ci sta nel popup.
+    private static void WriteScanSummaryFile(string outputFolderForScan, ScanSummary summary)
+    {
+        try
+        {
+            List<string> lines = new List<string>();
+            lines.Add(string.Format("Scansione del {0}", DateTime.Now));
+            lines.Add(string.Format("Trovati {0} file STEP: {1} nuovi, {2} senza conflitti noti, {3} con conflitti rilevati.",
+                summary.TotalSteps, summary.NewCount, summary.NoConflictCount, summary.ConflictCount));
+            lines.Add("");
+            foreach (ScanRow row in summary.Rows)
+            {
+                string line = string.Format("[{0}] {1}", row.Status, row.StepBaseName);
+                if (!string.IsNullOrEmpty(row.Detail))
+                {
+                    line += " - " + row.Detail;
+                }
+                lines.Add(line);
+            }
+            File.WriteAllLines(Path.Combine(outputFolderForScan, "ultima_scansione.txt"), lines.ToArray());
+        }
+        catch (Exception)
+        {
+            // file puramente informativo: se non si riesce a scrivere non blocchiamo il resto
         }
     }
 
