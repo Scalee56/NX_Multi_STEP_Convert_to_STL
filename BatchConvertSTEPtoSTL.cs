@@ -189,24 +189,35 @@ public class LauncherForm : Form
 
     public LauncherForm(string initialInputFolder, string initialOutputFolder)
     {
-        // IMPORTANTE: ShowIcon=false va impostato per PRIMO, prima di
-        // qualunque altra proprieta' della form. In alcune installazioni NX
-        // la versione di System.Drawing.Common caricata dal processo non e'
-        // compatibile con quella attesa da System.Windows.Forms: cambiare
-        // FormBorderStyle (o altre proprieta' che ricreano la cornice della
-        // finestra) fa scattare internamente un ridimensionamento dell'icona
-        // di default della form, che lancia un MissingMethodException su
-        // System.Drawing.Icon. Disattivare l'icona qui evita del tutto quel
-        // percorso di codice, qualunque sia la proprieta' che lo innesca.
-        ShowIcon = false;
-
+        // ATTENZIONE - compatibilita': in alcune installazioni NX la versione
+        // di System.Drawing.Common caricata dal processo non e' compatibile
+        // con quella attesa da System.Windows.Forms. Qualunque proprieta'
+        // della form che internamente richiami Form.UpdateWindowIcon (si e'
+        // visto succedere sia con FormBorderStyle sia con ShowIcon, quindi
+        // non e' una proprieta' specifica il problema, e' strutturale a
+        // quell'ambiente) lancia un MissingMethodException sul costruttore
+        // di System.Drawing.Icon e farebbe fallire l'intero journal PRIMA
+        // ancora che la finestra si apra.
+        //
+        // Fix: ogni proprieta' "cosmetica" e' avvolta nel proprio try/catch
+        // (metodi TrySetXxx sotto). Il try/catch cattura l'eccezione anche se
+        // viene lanciata DENTRO l'implementazione del setter (come in questo
+        // caso), quindi il costruttore prosegue comunque: se una di queste
+        // proprieta' non si puo' impostare in questo ambiente, la finestra
+        // si apre lo stesso (magari con un dettaglio estetico diverso, es.
+        // bordo ridimensionabile invece che fisso) invece di non aprirsi
+        // affatto. Niente riferimenti a System.Drawing.Icon qui: assegnare
+        // esplicitamente quel tipo rischierebbe di reintrodurre l'errore di
+        // compilazione gia' visto con Font/FontStyle su questa installazione
+        // NX (assembly System.Drawing.Common non referenziato di default).
         Text = "Conversione batch STEP -> STL";
         Width = 720;
         Height = 500;
-        StartPosition = FormStartPosition.CenterScreen;
-        MinimizeBox = false;
-        MaximizeBox = false;
-        FormBorderStyle = FormBorderStyle.FixedDialog;
+        TrySetShowIcon(false);
+        TrySetStartPosition(FormStartPosition.CenterScreen);
+        TrySetMinimizeBox(false);
+        TrySetMaximizeBox(false);
+        TrySetFormBorderStyle(FormBorderStyle.FixedDialog);
 
         BuildConfigPanel(initialInputFolder, initialOutputFolder);
         BuildResultsPanel();
@@ -215,6 +226,39 @@ public class LauncherForm : Form
         Controls.Add(panelConfig);
 
         ShowConfigScreen();
+    }
+
+    // Helper "best effort" per le proprieta' cosmetiche della form: ciascuno
+    // ignora silenziosamente qualunque eccezione. Servono a proteggere il
+    // costruttore da un ambiente NX dove una o piu' di queste proprieta'
+    // possono lanciare un MissingMethodException legato a un disallineamento
+    // tra le versioni di System.Windows.Forms e System.Drawing.Common
+    // caricate dal processo (vedi commento nel costruttore). Se una di
+    // queste chiamate fallisce, la finestra si apre comunque, al massimo con
+    // un dettaglio estetico diverso da quello previsto.
+    private void TrySetShowIcon(bool value)
+    {
+        try { ShowIcon = value; } catch (Exception) { }
+    }
+
+    private void TrySetStartPosition(FormStartPosition value)
+    {
+        try { StartPosition = value; } catch (Exception) { }
+    }
+
+    private void TrySetMinimizeBox(bool value)
+    {
+        try { MinimizeBox = value; } catch (Exception) { }
+    }
+
+    private void TrySetMaximizeBox(bool value)
+    {
+        try { MaximizeBox = value; } catch (Exception) { }
+    }
+
+    private void TrySetFormBorderStyle(FormBorderStyle value)
+    {
+        try { FormBorderStyle = value; } catch (Exception) { }
     }
 
     private void BuildConfigPanel(string initialInputFolder, string initialOutputFolder)
