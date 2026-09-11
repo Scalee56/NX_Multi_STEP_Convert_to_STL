@@ -189,6 +189,17 @@ public class LauncherForm : Form
 
     public LauncherForm(string initialInputFolder, string initialOutputFolder)
     {
+        // IMPORTANTE: ShowIcon=false va impostato per PRIMO, prima di
+        // qualunque altra proprieta' della form. In alcune installazioni NX
+        // la versione di System.Drawing.Common caricata dal processo non e'
+        // compatibile con quella attesa da System.Windows.Forms: cambiare
+        // FormBorderStyle (o altre proprieta' che ricreano la cornice della
+        // finestra) fa scattare internamente un ridimensionamento dell'icona
+        // di default della form, che lancia un MissingMethodException su
+        // System.Drawing.Icon. Disattivare l'icona qui evita del tutto quel
+        // percorso di codice, qualunque sia la proprieta' che lo innesca.
+        ShowIcon = false;
+
         Text = "Conversione batch STEP -> STL";
         Width = 720;
         Height = 500;
