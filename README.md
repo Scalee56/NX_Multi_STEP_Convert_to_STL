@@ -1,15 +1,15 @@
 # Batch Convert STEP to STL — NX Open Journal
 
-C# journal for NX Open that automatically converts every STEP file (`.stp` / `.step`) in an input folder into STL files, with an interactive folder/scan/decision flow, a pre-flight conflict scan, full assembly traversal, per-occurrence export of repeated components, and separate handling of open (non-solid) bodies.
+C# journal for NX Open that automatically converts every STEP file (`.stp` / `.step`) in an input folder into STL files, with an interactive folder/scan/decision flow that only asks what's actually needed, a pre-flight conflict scan, full assembly traversal, per-occurrence export of repeated components, and separate handling of open (non-solid) bodies.
 
 ## What it does
 
-1. Playing the journal (**Tools > Journal > Play...**) immediately asks — via a couple of dialog boxes, before any NX part is touched — whether to use the default input and output folders or pick different ones (via the native Windows folder browser).
-2. It then scans, purely on disk (no NX part is opened for this), what the batch would produce against what already exists in the output folder — both the old flat file layout and the new grouped-subfolder layout (see below) — and shows a summary dialog: how many STEP files are new / already OK / in conflict, plus a short list of the conflicting ones (the full list is always written to `ultima_scansione.txt` in the output folder, even if the dialog only shows the first several).
-3. After confirming you want to proceed, you choose **one** action for the whole batch, via a dialog with two options mapped to its buttons:
-   - **Sovrascrivi** (Sì) — proceed normally; any output the scan flagged as already existing gets overwritten instead of skipped.
-   - **Copia in nuova cartella** (No) — the *entire* run's output (not just the conflicting files) goes into a freshly auto-generated, timestamped subfolder (e.g. `STL_Convert\Export_2026-09-11_143000\`), leaving the configured output folder untouched. This is a fully independent run: it starts with its own empty `component_index.txt`, not the original's history.
-   - Answering "No" to the earlier "proceed?" question (or Cancel on either folder prompt) stops the journal immediately: nothing is written.
+1. Playing the journal (**Tools > Journal > Play...**) opens a small configuration window immediately, before any NX part is touched, with the input/output folders pre-filled and "Browse" buttons. On NX installations where a custom window can't be shown reliably (see "Notes"), the journal automatically falls back to native folder-browser dialogs instead — the rest of the flow behaves the same either way.
+2. Once you start the scan, it checks, purely on disk (no NX part is opened for this), what the batch would produce against what already exists in the output folder — both the old flat file layout and the new grouped-subfolder layout (see below).
+3. **It only asks a follow-up question if the scan actually found something to decide.** If nothing conflicts, the journal proceeds straight to the conversion — no extra dialogs. If the scan does find conflicting output from a previous run, you get a summary (counts, plus the conflicting files — the full list is always written to `ultima_scansione.txt`) and **one** choice for the whole batch:
+   - **Sovrascrivi** — the conflicting output gets overwritten; everything else proceeds normally.
+   - **Copia in nuova cartella** — the *entire* run's output (not just the conflicting files) goes into a freshly auto-generated, timestamped subfolder (e.g. `STL_Convert\Export_2026-09-11_143000\`), leaving the configured output folder untouched. This is a fully independent run: it starts with its own empty `component_index.txt`, not the original's history.
+   - **Interrompi** — stop, nothing is written.
 4. The actual conversion then loops over the input folder, and for every STEP file:
    - Opens the file as the active part in NX, switches to Modeling, cleans up faceted faces/edges.
    - Collects the bodies found directly in the part, split into solid bodies and open/non-solid bodies (sheet surfaces).
@@ -31,7 +31,7 @@ Progress is printed to the NX Listing Window and, at the same time, saved to a l
 ## Pre-flight scan and overwrite policy
 
 - The scan never opens an NX part: for STEP files already known from a previous run (tracked in `component_index.txt`), it recomputes each component's expected output path using the exact same naming logic as the real export, and checks whether it already exists on disk (checking both the legacy flat layout and the current grouped layout, so output from older versions of this journal is still correctly detected). A STEP file with no trace in the index and no matching file on disk is reported as `Nuovo` — by definition it can't conflict with anything.
-- The overwrite/copy decision is made **once for the whole batch**, not per file, to avoid a wall of repeated prompts on large batches.
+- The overwrite/copy decision is made **once for the whole batch**, not per file, to avoid a wall of repeated prompts on large batches — and isn't asked at all when the scan finds no conflicts.
 - Regardless of the chosen mode, a collision **between two outputs produced by the same run** (two different sources that would land on the same file path) is always caught and skipped with a warning — the script never silently overwrites a file it just wrote in this same run.
 - **Multi-lump body separation (currently a no-op stub).** The script attempts, best-effort, to separate bodies made of multiple disconnected "lumps" before exporting, so that visually distinct solids fused into a single NX `Body` don't end up merged into one STL. This is controlled by `trySeparateMultiLumpBodies` (default `false`) and is currently an inactive stub — the correct NXOpen API depends on your NX version. See the comment above `TrySeparateMultiLumpBodies` in the source for how to record a journal and supply the right API call.
 
@@ -55,19 +55,18 @@ To change the tolerances or the default folders, edit these lines directly befor
 
 ## Prerequisites
 
-- Siemens NX with the **Journal** feature available (standard in most licenses; needs the NX Open .NET environment, installed by default with NX). The interactive dialogs use `System.Windows.Forms.MessageBox` and `System.Windows.Forms.FolderBrowserDialog` only — both wrap native Windows dialogs and don't require a custom window/Form to be created, which matters on NX installations where a custom `Form` fails with a `System.Drawing`/`System.Windows.Forms` version-mismatch crash (see "Notes" below).
+- Siemens NX with the **Journal** feature available (standard in most licenses; needs the NX Open .NET environment, installed by default with NX). The GUI uses `System.Windows.Forms`; on installations where a custom `Form` can't be shown (see "Notes"), the journal automatically falls back to `System.Windows.Forms.MessageBox`/`FolderBrowserDialog`, which wrap native Windows dialogs instead of creating a managed window.
 - Write permissions on the output folder (and on the Desktop, used as a fallback for the log).
 - An input folder containing the STEP files — it must exist before scanning, otherwise a dialog reports the error and the journal stops. The output folder is created automatically if it doesn't exist yet.
 
 ## How to use it
 
 1. Open NX (no part needs to be open beforehand). Go to **Tools > Journal > Play...** (Strumenti > Automazione > Journal > Riproduci...) and select `BatchConvertSTEPtoSTL.cs`.
-2. Two dialogs ask you to confirm (or change, via the native folder browser) the input and output folders. Answering "Annulla" on either one stops the journal immediately.
-3. A dialog shows the scan results (counts of new/OK/conflicting STEP files, plus a short list of the conflicting ones — the full list is always in `ultima_scansione.txt`) and asks whether to proceed.
-4. If you proceed, a dialog asks **Sovrascrivi** (Sì) or **Copia in nuova cartella** (No) for the whole batch.
-5. The conversion then runs: progress is printed to the NX Listing Window, with `[n/total]` progress lines and an OK/ERROR result for each file (and, for assemblies, one result line per exported component occurrence).
-6. Let it run until you see the final summary block, with per-STEP-file and per-component totals plus grand totals for solid bodies, open bodies, and STL files written. Do not close NX while it's running.
-7. When it's done, check the output folder (the original one, or the new timestamped one if you chose "Copia in nuova cartella"):
+2. Check or change the input/output folders (via "Sfoglia..." or by typing directly), then start the scan (in the fallback mode, each folder is picked via one native browser dialog — the default is already pre-selected, so just confirming it is one click).
+3. **If the scan finds no conflicts, the conversion starts immediately — no further questions.** If it finds output that already exists from a previous run, you get a summary (counts, plus a short list of the conflicting files — the full list is always in `ultima_scansione.txt`) and a single choice: **Interrompi**, **Sovrascrivi**, or **Copia in nuova cartella**.
+4. The conversion then runs: progress is printed to the NX Listing Window, with `[n/total]` progress lines and an OK/ERROR result for each file (and, for assemblies, one result line per exported component occurrence).
+5. Let it run until you see the final summary block, with per-STEP-file and per-component totals plus grand totals for solid bodies, open bodies, and STL files written. Do not close NX while it's running.
+6. When it's done, check the output folder (the original one, or the new timestamped one if you chose "Copia in nuova cartella"):
    - The converted `.stl` files, flat or grouped into per-source subfolders depending on how many files each source produced (see "Output layout" above).
    - `000_Not_Closed_Mesh\` folders (top-level and/or nested inside grouped subfolders): STL files for open/non-solid bodies, if any were found and `exportNotClosedMeshes` is `true`.
    - `log_conversione.txt`: full run log, written incrementally as the batch progresses.
@@ -95,4 +94,4 @@ If a file or component fails, it doesn't block the rest of the batch: the error 
 - If writing the log to file also fails (e.g. the output folder isn't writable), the script doesn't stop: it falls back to writing the log to the Desktop.
 - The component index (`component_index.txt`) is append-only and never deduplicated: each line represents one occurrence of a component in an assembly, so repeated components keep their correct quantity across runs. In "Copia in nuova cartella" mode, the new folder starts with its own empty index — it does not inherit the original folder's history.
 - Multi-lump body separation is not yet functional (`trySeparateMultiLumpBodies = false`, no-op stub) — see the comment above `TrySeparateMultiLumpBodies` in the source for how to help complete it by recording a journal of a manual "Separate Bodies" operation in your NX version.
-- The interactive prompts deliberately use only `MessageBox` and `FolderBrowserDialog`, not a custom `System.Windows.Forms.Form`. An earlier version used a custom form with a scrollable results list, but on some NX installations *any* `Form` crashes the moment it's shown (`Form.ShowDialog` → `Form.CreateHandle` → `Form.UpdateWindowIcon` → `MissingMethodException` on `System.Drawing.Icon`'s constructor), due to a version mismatch between the `System.Windows.Forms` and `System.Drawing.Common` assemblies loaded by the NX process. `MessageBox`/`FolderBrowserDialog` wrap native Windows dialogs instead of creating a managed `Form`, so they aren't affected.
+- **GUI reliability.** On some NX installations, *any* `System.Windows.Forms.Form` crashes the moment it's shown (`Form.ShowDialog` → `Form.CreateHandle` → `Form.UpdateWindowIcon` → `MissingMethodException` on `System.Drawing.Icon`'s constructor), due to a version mismatch between the `System.Windows.Forms` and `System.Drawing.Common` assemblies loaded by the NX process. The journal first tries a best-effort mitigation (loading the `System.Drawing.Common.dll` that sits next to `System.Windows.Forms.dll`, in case nothing incompatible has been loaded yet) and then tries to show the real configuration/results window; if creating it throws for any reason, the journal logs that and transparently switches to an equivalent flow built only from `MessageBox` and `FolderBrowserDialog` (native Windows dialogs, not a managed `Form`, so unaffected by this issue). Either way you get the same "ask only if there's a real decision to make" behavior described above.
