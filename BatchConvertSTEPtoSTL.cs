@@ -138,7 +138,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Drawing;
 using System.IO;
 using System.Windows.Forms;
 using NXOpen;
@@ -212,9 +211,13 @@ public class LauncherForm : Form
         panelConfig = new Panel();
         panelConfig.Dock = DockStyle.Fill;
 
+        // Niente System.Drawing/Font qui: alcune versioni di NX compilano i
+        // journal su un runtime .NET dove System.Drawing.Common non e' un
+        // riferimento di default, e aggiungerlo esplicitamente non e'
+        // affidabile su tutte le versioni. Il titolo usa quindi il font di
+        // default del controllo, senza personalizzazioni grafiche.
         Label lblTitle = new Label();
-        lblTitle.Text = "Conversione batch STEP -> STL";
-        lblTitle.Font = new Font(this.Font.FontFamily, 14, FontStyle.Bold);
+        lblTitle.Text = "=== Conversione batch STEP -> STL ===";
         lblTitle.SetBounds(20, 16, 660, 30);
 
         Label lblIn = new Label();
