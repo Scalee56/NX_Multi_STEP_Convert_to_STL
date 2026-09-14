@@ -1,23 +1,24 @@
 # Batch Convert STEP to STL — NX Open Journal
 
-C# journal for NX Open that automatically converts every STEP file (`.stp` / `.step`) in an input folder into STL files, with an interactive folder/scan/decision flow that only asks what's actually needed, a pre-flight conflict scan, full assembly traversal, per-occurrence export of repeated components, and separate handling of open (non-solid) bodies.
+C# journal for NX Open that automatically converts every STEP file (`.stp` / `.step`) in an input folder into STL files, driven from **a single window** that covers the entire flow (configuration, optional conflict resolution, live progress, final summary), with a pre-flight conflict scan, full assembly traversal, per-occurrence export of repeated components, and separate handling of open (non-solid) bodies.
 
 ## What it does
 
-1. Playing the journal (**Tools > Journal > Play...**) opens a small configuration window immediately, before any NX part is touched, with the input/output folders pre-filled and "Browse" buttons. On NX installations where a custom window can't be shown reliably (see "Notes"), the journal automatically falls back to native folder-browser dialogs instead — the rest of the flow behaves the same either way.
+1. Playing the journal (**Tools > Journal > Play...**) opens a single window immediately, before any NX part is touched, with the input/output folders pre-filled and "Browse" buttons, plus an optional "Mostra opzioni avanzate" section to change the STL tolerances or the open-mesh export behaviour for just this run. On NX installations where a custom window can't be shown reliably (see "Notes"), the journal automatically falls back to native folder-browser/MessageBox dialogs instead — the rest of the flow behaves the same either way, just without the live progress panel described below.
 2. Once you start the scan, it checks, purely on disk (no NX part is opened for this), what the batch would produce against what already exists in the output folder — both the old flat file layout and the new grouped-subfolder layout (see below).
-3. **It only asks a follow-up question if the scan actually found something to decide.** If nothing conflicts, the journal proceeds straight to the conversion — no extra dialogs. If the scan does find conflicting output from a previous run, you get a summary (counts, plus the conflicting files — the full list is always written to `ultima_scansione.txt`) and **one** choice for the whole batch:
+3. **It only asks a follow-up question if the scan actually found something to decide.** If nothing conflicts, the journal proceeds straight to the conversion — no extra dialogs, no window switch. If the scan does find conflicting output from a previous run, the *same window* switches to a results screen (counts, plus the conflicting files — the full list is always written to `ultima_scansione.txt`) and asks **one** choice for the whole batch:
    - **Sovrascrivi** — the conflicting output gets overwritten; everything else proceeds normally.
    - **Copia in nuova cartella** — the *entire* run's output (not just the conflicting files) goes into a freshly auto-generated, timestamped subfolder (e.g. `STL_Convert\Export_2026-09-11_143000\`), leaving the configured output folder untouched. This is a fully independent run: it starts with its own empty `component_index.txt`, not the original's history.
    - **Interrompi** — stop, nothing is written.
-4. The actual conversion then loops over the input folder, and for every STEP file:
+4. The same window then switches to a progress screen and the actual conversion loops over the input folder; for every STEP file:
    - Opens the file as the active part in NX, switches to Modeling, cleans up faceted faces/edges.
    - Collects the bodies found directly in the part, split into solid bodies and open/non-solid bodies (sheet surfaces).
    - If direct bodies are found, exports them (see "Output layout" below).
    - If no direct bodies are found and the part is an assembly, walks the component tree recursively and applies the same export logic to every component with its own bodies, exporting **each occurrence separately** — or, if that assembly was already processed in a previous run and its component `.prt` files still exist in the input folder, reopens those `.prt` files directly instead of reopening the STEP file.
    - Closes the part without saving and moves on to the next file.
+5. When it's done (or after you cancel it — see below), the same window's progress panel turns into a final summary: how many STEP files succeeded/failed and how many STL files were written, plus a button to open the output folder directly and a "Chiudi" button.
 
-Progress is printed to the NX Listing Window and, at the same time, saved to a log file on disk incrementally (line by line, not just at the end), so the result is still available even if the Listing Window isn't visible, or the journal is interrupted mid-batch.
+Progress is shown live in the window itself (current file, a progress bar, and a scrolling log), and at the same time printed to the NX Listing Window and saved to a log file on disk incrementally (line by line, not just at the end), so the result is still available even if the window or Listing Window aren't visible, or the journal is interrupted mid-batch. A **"Annulla"** button lets you stop the conversion cleanly between one STEP file and the next (never mid-export) — files already written stay on disk, and the log/component index/summary are still written correctly for the files that did complete.
 
 ## Output layout
 

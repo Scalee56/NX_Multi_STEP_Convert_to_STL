@@ -1,9 +1,32 @@
 // =============================================================================
-// NX Open Journal - Conversione massiva STEP -> STL (v9)
+// NX Open Journal - Conversione massiva STEP -> STL (v10)
 // Basato sul journal originale "journal.cs" (export singolo STL registrato in NX),
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
-// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v9):
+// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v10):
+// - NUOVO: la finestra grafica (LauncherForm) ora gestisce l'INTERO flusso in
+//   un'unica finestra, senza mai chiudersi e riaprirsi: configurazione
+//   cartelle -> (se servono) risoluzione conflitti -> avanzamento della
+//   conversione in tempo reale -> riepilogo finale, tutto nella stessa
+//   finestra. Prima l'avanzamento della conversione si vedeva solo nella
+//   Listing Window di NX (una finestra separata, tecnica); ora un pannello
+//   dedicato mostra una barra di avanzamento, il file corrente e il log
+//   completo in tempo reale (lo stesso testo che va anche nella Listing
+//   Window e nel file di log), con un bottone "Annulla" che interrompe la
+//   conversione in modo sicuro al confine tra un file STEP e il successivo
+//   (mai a meta' esportazione). A fine conversione lo stesso pannello mostra
+//   il riepilogo (quanti file riusciti/falliti, quanti STL scritti) con un
+//   bottone per aprire direttamente la cartella di output.
+// - NUOVO: pannello "Opzioni avanzate" (nascosto di default) nella schermata
+//   di configurazione, per modificare le tolleranze STL (chordal, adjacency,
+//   angular) e se esportare anche le superfici non chiuse direttamente dalla
+//   GUI, senza piu' dover editare questo file per il caso comune di voler
+//   cambiare questi valori per una singola esecuzione.
+// - Rimangono finestre separate (MessageBox/FolderBrowserDialog) solo per le
+//   domande puntuali che lo richiedono davvero (cartella non trovata, errori,
+//   selezione di una cartella) - mai per il flusso principale.
+//
+// COSA ERA GIA' PRESENTE IN v9:
 // - NUOVO: il journal ora si apre con una GUI (WinForms) come vero punto di
 //   ingresso: alla riproduzione (Tools > Journal > Play) appare subito una
 //   finestra con le cartelle di input/output (modificabili con pulsanti
@@ -105,14 +128,20 @@
 // 1. In NX: Strumenti > Automazione > Journal > Riproduci... e seleziona
 //    questo file .cs. Si apre subito una finestra: verifica o modifica le
 //    cartelle di input (file STEP) e output (file STL) - di default sono
-//    quelle configurate qui sotto - poi premi "Avvia scansione".
+//    quelle configurate qui sotto - ed eventualmente apri "Mostra opzioni
+//    avanzate" per cambiare le tolleranze STL o l'esportazione delle
+//    superfici non chiuse solo per questa esecuzione, poi premi
+//    "Avvia scansione".
 // 2. La scansione confronta (senza aprire alcuna parte NX) cosa produrrebbe
 //    il batch con quanto gia' presente nella cartella di output, e mostra un
 //    riepilogo con una lista (Nuovo / OK / CONFLITTO per ogni file STEP).
 // 3. Scegli come procedere: "Interrompi" (esce, nessun file scritto),
 //    "Sovrascrivi" (procede, i conflitti rilevati vengono sovrascritti), o
 //    "Copia in nuova cartella" (tutto l'output di questo run va in una nuova
-//    sottocartella con timestamp, la cartella originale resta intatta).
+//    sottocartella con timestamp, la cartella originale resta intatta). La
+//    stessa finestra passa quindi al pannello di avanzamento (barra di
+//    progresso, file corrente, log in tempo reale, bottone "Annulla") e
+//    infine al riepilogo finale, senza mai chiudersi nel frattempo.
 // 4. Per ogni file .stp/.step:
 //    - i corpi solidi diretti vengono esportati, un file per corpo;
 //    - i corpi NON solidi (superfici aperte) diretti vengono esportati con
@@ -127,10 +156,12 @@
 //      noti dall'indice) e applica la stessa logica per ciascun componente,
 //      esportando ogni occorrenza separatamente se il componente e' usato
 //      piu' volte.
-// 5. Il progresso viene stampato nella Listing Window di NX. Log dettagliato in
-//    "log_conversione.txt", errori in "errori_conversione.log", mappa
-//    step->componenti in "component_index.txt" (tutti dentro la cartella di
-//    output effettiva di questo run).
+// 5. Il progresso si vede in tempo reale nel pannello della finestra stessa
+//    (oltre che nella Listing Window di NX, che resta comunque aggiornata).
+//    Log dettagliato in "log_conversione.txt", errori in
+//    "errori_conversione.log", mappa step->componenti in
+//    "component_index.txt" (tutti dentro la cartella di output effettiva di
+//    questo run).
 // 6. Prova PRIMA su 2-3 file soli (includendo se possibile un assieme con un
 //    componente ripetuto piu' volte, una parte con piu' corpi solidi, e/o
 //    corpi multi-lump), poi lancia sul totale.
@@ -177,22 +208,43 @@ internal class ScanSummary
 // (RunFallbackFlow, piu' sotto), che sono dialoghi nativi di Windows e non
 // passano da Form.UpdateWindowIcon.
 
-// Finestra unica (due schermate) che funge da punto di ingresso del journal:
-// prima la configurazione delle cartelle e l'avvio della scansione, poi -
-// SOLO SE la scansione trova davvero dei conflitti da risolvere - il
-// riepilogo dei risultati e la scelta di come procedere. Se non ci sono
-// conflitti non ha senso chiedere nulla: si chiude e si procede subito.
+// Finestra unica (tre schermate, mai chiusa e riaperta nel mezzo) che funge
+// da punto di ingresso del journal e da centro di controllo per l'intero
+// flusso: 1) configurazione delle cartelle (con opzioni avanzate opzionali)
+// e avvio della scansione; 2) SOLO SE la scansione trova davvero dei
+// conflitti da risolvere, il riepilogo dei risultati e la scelta di come
+// procedere (se non ci sono conflitti si passa direttamente al punto 3);
+// 3) avanzamento della conversione in tempo reale (barra di progresso, file
+// corrente, log live, bottone Annulla), che a fine conversione si trasforma
+// nel riepilogo finale con il bottone per aprire la cartella di output. La
+// finestra si chiude solo quando l'utente lo decide esplicitamente
+// (Interrompi prima di iniziare, oppure Chiudi dal riepilogo finale).
 public class LauncherForm : Form
 {
     public string ResultInputFolder;
     public string ResultOutputFolder;
     public BatchDecision ChosenDecision = BatchDecision.Stop;
 
+    // true non appena StartConversion() ha avviato RunBatch (a prescindere
+    // dall'esito: completata, annullata o fallita): dice a Main() che la
+    // conversione e' gia' stata gestita per intero dentro questa finestra,
+    // quindi non deve rilanciarla dopo la chiusura del form.
+    public bool ConversionRan = false;
+
+    private readonly Session theSession;
+    private readonly ListingWindow lw;
+
     private Panel panelConfig;
     private TextBox txtInputFolder;
     private TextBox txtOutputFolder;
     private Button btnBrowseInput;
     private Button btnBrowseOutput;
+    private CheckBox chkShowAdvanced;
+    private Panel panelAdvanced;
+    private NumericUpDown numChordalTol;
+    private NumericUpDown numAdjacencyTol;
+    private NumericUpDown numAngularTol;
+    private CheckBox chkExportNotClosed;
     private Button btnScan;
 
     private Panel panelResults;
@@ -203,8 +255,21 @@ public class LauncherForm : Form
     private Button btnOverwrite;
     private Button btnCopy;
 
-    public LauncherForm(string initialInputFolder, string initialOutputFolder)
+    private Panel panelProgress;
+    private Label lblProgressHeader;
+    private Label lblCurrentFile;
+    private ProgressBar progressBar;
+    private TextBox txtLog;
+    private Button btnCancel;
+    private Button btnOpenOutput;
+    private Button btnCloseSummary;
+    private string lastResultOutputFolder;
+
+    public LauncherForm(Session session, ListingWindow listingWindow, string initialInputFolder, string initialOutputFolder)
     {
+        theSession = session;
+        lw = listingWindow;
+
         // Ogni proprieta' "cosmetica" e' avvolta nel proprio try/catch
         // (metodi TrySetXxx sotto): se una di queste lancia un'eccezione in
         // questo ambiente, il costruttore prosegue comunque invece di
@@ -222,7 +287,9 @@ public class LauncherForm : Form
 
         BuildConfigPanel(initialInputFolder, initialOutputFolder);
         BuildResultsPanel();
+        BuildProgressPanel();
 
+        Controls.Add(panelProgress);
         Controls.Add(panelResults);
         Controls.Add(panelConfig);
 
@@ -296,9 +363,16 @@ public class LauncherForm : Form
             "non trova conflitti la conversione parte subito; altrimenti ti verra' chiesto come procedere.";
         lblInfo.SetBounds(20, 196, 660, 54);
 
+        chkShowAdvanced = new CheckBox();
+        chkShowAdvanced.Text = "Mostra opzioni avanzate (tolleranze STL, superfici non chiuse)";
+        chkShowAdvanced.SetBounds(20, 260, 400, 22);
+        chkShowAdvanced.CheckedChanged += ChkShowAdvanced_CheckedChanged;
+
+        BuildAdvancedPanel();
+
         btnScan = new Button();
         btnScan.Text = "Avvia scansione";
-        btnScan.SetBounds(20, 264, 160, 32);
+        btnScan.SetBounds(20, 400, 160, 32);
         btnScan.Click += BtnScan_Click;
 
         panelConfig.Controls.Add(lblTitle);
@@ -309,7 +383,75 @@ public class LauncherForm : Form
         panelConfig.Controls.Add(txtOutputFolder);
         panelConfig.Controls.Add(btnBrowseOutput);
         panelConfig.Controls.Add(lblInfo);
+        panelConfig.Controls.Add(chkShowAdvanced);
+        panelConfig.Controls.Add(panelAdvanced);
         panelConfig.Controls.Add(btnScan);
+    }
+
+    // Sezione "Opzioni avanzate": nascosta di default (mostra/nasconde con
+    // chkShowAdvanced), permette di modificare per questa esecuzione le
+    // tolleranze STL e se esportare anche le superfici non chiuse, senza
+    // dover editare il file .cs. I valori iniziali sono quelli configurati
+    // di default in NXJournal.
+    private void BuildAdvancedPanel()
+    {
+        panelAdvanced = new Panel();
+        panelAdvanced.SetBounds(20, 286, 660, 106);
+        panelAdvanced.Visible = false;
+
+        Label lblChordal = new Label();
+        lblChordal.Text = "Tolleranza cordale (chordal):";
+        lblChordal.SetBounds(0, 2, 260, 20);
+
+        numChordalTol = new NumericUpDown();
+        numChordalTol.SetBounds(270, 0, 100, 22);
+        numChordalTol.Minimum = 0.0001m;
+        numChordalTol.Maximum = 10m;
+        numChordalTol.DecimalPlaces = 4;
+        numChordalTol.Increment = 0.0001m;
+        numChordalTol.Value = (decimal)NXJournal.chordalTol;
+
+        Label lblAdjacency = new Label();
+        lblAdjacency.Text = "Tolleranza di adiacenza (adjacency):";
+        lblAdjacency.SetBounds(0, 30, 260, 20);
+
+        numAdjacencyTol = new NumericUpDown();
+        numAdjacencyTol.SetBounds(270, 28, 100, 22);
+        numAdjacencyTol.Minimum = 0.01m;
+        numAdjacencyTol.Maximum = 50m;
+        numAdjacencyTol.DecimalPlaces = 2;
+        numAdjacencyTol.Increment = 0.01m;
+        numAdjacencyTol.Value = (decimal)NXJournal.adjacencyTol;
+
+        Label lblAngular = new Label();
+        lblAngular.Text = "Tolleranza angolare (gradi):";
+        lblAngular.SetBounds(0, 58, 260, 20);
+
+        numAngularTol = new NumericUpDown();
+        numAngularTol.SetBounds(270, 56, 100, 22);
+        numAngularTol.Minimum = 0.1m;
+        numAngularTol.Maximum = 90m;
+        numAngularTol.DecimalPlaces = 1;
+        numAngularTol.Increment = 0.5m;
+        numAngularTol.Value = (decimal)NXJournal.angularTol;
+
+        chkExportNotClosed = new CheckBox();
+        chkExportNotClosed.Text = "Esporta anche le superfici non chiuse (mesh aperte)";
+        chkExportNotClosed.SetBounds(400, 0, 260, 60);
+        chkExportNotClosed.Checked = NXJournal.exportNotClosedMeshes;
+
+        panelAdvanced.Controls.Add(lblChordal);
+        panelAdvanced.Controls.Add(numChordalTol);
+        panelAdvanced.Controls.Add(lblAdjacency);
+        panelAdvanced.Controls.Add(numAdjacencyTol);
+        panelAdvanced.Controls.Add(lblAngular);
+        panelAdvanced.Controls.Add(numAngularTol);
+        panelAdvanced.Controls.Add(chkExportNotClosed);
+    }
+
+    private void ChkShowAdvanced_CheckedChanged(object sender, EventArgs e)
+    {
+        panelAdvanced.Visible = chkShowAdvanced.Checked;
     }
 
     private void BuildResultsPanel()
@@ -431,9 +573,7 @@ public class LauncherForm : Form
 
         if (summary.ConflictCount == 0)
         {
-            ChosenDecision = BatchDecision.Overwrite;
-            DialogResult = DialogResult.OK;
-            Close();
+            StartConversion(BatchDecision.Overwrite);
             return;
         }
 
@@ -465,45 +605,250 @@ public class LauncherForm : Form
 
     private void BtnStop_Click(object sender, EventArgs e)
     {
-        FinishWith(BatchDecision.Stop);
+        ChosenDecision = BatchDecision.Stop;
+        DialogResult = DialogResult.OK;
+        Close();
     }
 
     private void BtnOverwrite_Click(object sender, EventArgs e)
     {
-        FinishWith(BatchDecision.Overwrite);
+        StartConversion(BatchDecision.Overwrite);
     }
 
     private void BtnCopy_Click(object sender, EventArgs e)
     {
-        FinishWith(BatchDecision.CopyToNewFolder);
+        StartConversion(BatchDecision.CopyToNewFolder);
     }
 
-    private void FinishWith(BatchDecision decision)
+    // Avvia la conversione vera e propria SENZA chiudere la finestra: si
+    // passa al pannello di avanzamento (stessa finestra) e si chiama
+    // direttamente RunBatch, che nel frattempo aggiorna log/barra tramite i
+    // metodi AppendLogLine/SetProgress sotto. La finestra si chiude solo
+    // quando l'utente preme "Chiudi" nel riepilogo finale.
+    private void StartConversion(BatchDecision decision)
     {
         ChosenDecision = decision;
         ResultInputFolder = txtInputFolder.Text.Trim();
         ResultOutputFolder = txtOutputFolder.Text.Trim();
+
+        NXJournal.inputFolder = ResultInputFolder;
+        NXJournal.configuredOutputFolder = ResultOutputFolder;
+        NXJournal.ApplyAdvancedOptions(
+            (double)numChordalTol.Value, (double)numAdjacencyTol.Value,
+            (double)numAngularTol.Value, chkExportNotClosed.Checked);
+
+        txtLog.Clear();
+        progressBar.Value = 0;
+        lblProgressHeader.Text = "Conversione in corso...";
+        lblCurrentFile.Text = "Preparazione in corso...";
+        btnCancel.Enabled = true;
+        btnCancel.Text = "Annulla";
+        btnCancel.Visible = true;
+        btnOpenOutput.Visible = false;
+        btnCloseSummary.Visible = false;
+        ShowProgressScreen();
+        Application.DoEvents();
+
+        NXJournal.ActiveProgressForm = this;
+        NXJournal.CancelRequested = false;
+        ConversionRan = true;
+
+        NXJournal.BatchResult result;
+        try
+        {
+            result = NXJournal.RunBatch(theSession, lw, decision);
+        }
+        catch (Exception ex)
+        {
+            NXJournal.Log(lw, "ERRORE GENERALE (la conversione si e' fermata): " + ex.Message);
+            NXJournal.Log(lw, ex.StackTrace);
+            result = new NXJournal.BatchResult();
+            result.OutputFolder = NXJournal.outputFolder;
+            result.FatalError = ex.Message;
+        }
+        finally
+        {
+            NXJournal.ActiveProgressForm = null;
+        }
+
+        ShowSummary(result);
+    }
+
+    private void BtnCancel_Click(object sender, EventArgs e)
+    {
+        NXJournal.CancelRequested = true;
+        btnCancel.Enabled = false;
+        btnCancel.Text = "Annullamento in corso...";
+    }
+
+    private void BtnOpenOutput_Click(object sender, EventArgs e)
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(lastResultOutputFolder) && Directory.Exists(lastResultOutputFolder))
+            {
+                System.Diagnostics.Process.Start("explorer.exe", "\"" + lastResultOutputFolder + "\"");
+            }
+        }
+        catch (Exception)
+        {
+            // apertura della cartella puramente di comodo: se fallisce non blocchiamo nulla
+        }
+    }
+
+    private void BtnCloseSummary_Click(object sender, EventArgs e)
+    {
         DialogResult = DialogResult.OK;
         Close();
+    }
+
+    // Chiamato da NXJournal.Log() per ogni riga, se questa finestra e' il
+    // form di avanzamento attivo: tiene il log della GUI allineato in tempo
+    // reale a quello che va nella Listing Window/file di log.
+    internal void AppendLogLine(string message)
+    {
+        if (txtLog == null || txtLog.IsDisposed)
+        {
+            return;
+        }
+        txtLog.AppendText(message + Environment.NewLine);
+    }
+
+    // Chiamato da NXJournal.ReportProgress() a inizio di ogni file STEP.
+    internal void SetProgress(int current, int total, string label)
+    {
+        if (progressBar == null || progressBar.IsDisposed)
+        {
+            return;
+        }
+        if (total > 0)
+        {
+            progressBar.Maximum = total;
+            progressBar.Value = Math.Min(Math.Max(current, 0), total);
+        }
+        lblCurrentFile.Text = label;
+    }
+
+    private void ShowSummary(NXJournal.BatchResult result)
+    {
+        lastResultOutputFolder = result.OutputFolder;
+
+        string headline;
+        if (result.FatalError != null)
+        {
+            headline = "Conversione interrotta da un errore imprevisto: " + result.FatalError;
+        }
+        else if (result.Cancelled)
+        {
+            headline = string.Format(
+                "Annullato dall'utente: {0} file STEP completati su {1}, {2} file STL scritti.",
+                result.Ok + result.Failed, result.TotalSteps, result.GrandFiles);
+        }
+        else
+        {
+            headline = string.Format(
+                "Completato: {0} file STEP riusciti su {1}, {2} file STL scritti.",
+                result.Ok, result.TotalSteps, result.GrandFiles);
+            if (result.Failed > 0)
+            {
+                headline += string.Format(" ({0} file STEP falliti: vedi log errori.)", result.Failed);
+            }
+        }
+
+        lblProgressHeader.Text = headline;
+        lblCurrentFile.Text = "Cartella di output: " + result.OutputFolder;
+
+        btnCancel.Visible = false;
+        btnOpenOutput.Visible = true;
+        btnCloseSummary.Visible = true;
     }
 
     private void ShowConfigScreen()
     {
         panelResults.Visible = false;
+        panelProgress.Visible = false;
         panelConfig.Visible = true;
     }
 
     private void ShowResultsScreen()
     {
         panelConfig.Visible = false;
+        panelProgress.Visible = false;
         panelResults.Visible = true;
     }
 
+    private void ShowProgressScreen()
+    {
+        panelConfig.Visible = false;
+        panelResults.Visible = false;
+        panelProgress.Visible = true;
+    }
+
+    // Costruisce il terzo pannello (avanzamento -> diventa riepilogo a fine
+    // conversione, vedi ShowSummary): barra di progresso, log testuale live
+    // (rispecchia la Listing Window/il file di log) e i pulsanti Annulla /
+    // Apri cartella di output / Chiudi (questi ultimi due nascosti finche'
+    // la conversione non e' finita).
+    private void BuildProgressPanel()
+    {
+        panelProgress = new Panel();
+        panelProgress.Dock = DockStyle.Fill;
+
+        lblProgressHeader = new Label();
+        lblProgressHeader.Text = "Conversione in corso...";
+        lblProgressHeader.SetBounds(20, 16, 660, 38);
+
+        lblCurrentFile = new Label();
+        lblCurrentFile.Text = "";
+        lblCurrentFile.SetBounds(20, 58, 660, 20);
+
+        progressBar = new ProgressBar();
+        progressBar.SetBounds(20, 82, 660, 22);
+        progressBar.Minimum = 0;
+        progressBar.Maximum = 100;
+        progressBar.Value = 0;
+
+        txtLog = new TextBox();
+        txtLog.SetBounds(20, 112, 660, 254);
+        txtLog.Multiline = true;
+        txtLog.ReadOnly = true;
+        txtLog.ScrollBars = ScrollBars.Vertical;
+        txtLog.WordWrap = false;
+
+        btnCancel = new Button();
+        btnCancel.Text = "Annulla";
+        btnCancel.SetBounds(20, 400, 110, 32);
+        btnCancel.Click += BtnCancel_Click;
+
+        btnOpenOutput = new Button();
+        btnOpenOutput.Text = "Apri cartella di output";
+        btnOpenOutput.SetBounds(430, 400, 150, 32);
+        btnOpenOutput.Click += BtnOpenOutput_Click;
+        btnOpenOutput.Visible = false;
+
+        btnCloseSummary = new Button();
+        btnCloseSummary.Text = "Chiudi";
+        btnCloseSummary.SetBounds(590, 400, 90, 32);
+        btnCloseSummary.Click += BtnCloseSummary_Click;
+        btnCloseSummary.Visible = false;
+
+        panelProgress.Controls.Add(lblProgressHeader);
+        panelProgress.Controls.Add(lblCurrentFile);
+        panelProgress.Controls.Add(progressBar);
+        panelProgress.Controls.Add(txtLog);
+        panelProgress.Controls.Add(btnCancel);
+        panelProgress.Controls.Add(btnOpenOutput);
+        panelProgress.Controls.Add(btnCloseSummary);
+    }
+
     // Chiusura della finestra (es. [X], Alt+F4) senza aver premuto nessuno dei
-    // pulsanti di decisione equivale sempre a "Interrompi" (default sicuro).
+    // pulsanti di decisione equivale sempre a "Interrompi" (default sicuro),
+    // ma solo se la conversione non e' gia' partita (altrimenti manterrebbe
+    // comunque il risultato gia' prodotto: chiudere a conversione finita non
+    // deve "annullare" nulla).
     protected override void OnFormClosing(FormClosingEventArgs e)
     {
-        if (DialogResult != DialogResult.OK)
+        if (DialogResult != DialogResult.OK && !ConversionRan)
         {
             ChosenDecision = BatchDecision.Stop;
         }
@@ -517,30 +862,37 @@ public class NXJournal
     // CONFIGURAZIONE (valori di default: modificabili anche dalla GUI ad ogni
     // esecuzione, senza dover editare questo file)
     // =========================================================================
-    private static string inputFolder = @"C:\Users\AndreaScalenghe\Desktop\STEP_Convert";
+    // internal (non piu' private): LauncherForm imposta questi campi con i
+    // valori scelti dall'utente subito prima di avviare RunBatch (vedi
+    // StartConversion), esattamente come faceva gia' Main() con il vecchio
+    // flusso a finestra "usa e getta".
+    internal static string inputFolder = @"C:\Users\AndreaScalenghe\Desktop\STEP_Convert";
 
     // Cartella di output COME CONFIGURATA dall'utente (default o valore
     // inserito nella GUI). E' la base su cui viene calcolata "outputFolder",
     // la cartella EFFETTIVA di questo run (vedi RunBatch): in modalita'
     // "Sovrascrivi" coincidono, in modalita' "Copia in nuova cartella"
     // "outputFolder" diventa una sottocartella con timestamp sotto questa.
-    private static string configuredOutputFolder = @"C:\Users\AndreaScalenghe\Desktop\STL_Convert";
+    internal static string configuredOutputFolder = @"C:\Users\AndreaScalenghe\Desktop\STL_Convert";
 
     // Cartella di output EFFETTIVA per il run in corso. Inizializzata uguale
     // a configuredOutputFolder (cosi' resta sensata anche se l'utente sceglie
     // "Interrompi" prima che RunBatch la ricalcoli), poi eventualmente
     // sovrascritta in RunBatch in base alla decisione scelta.
-    private static string outputFolder = configuredOutputFolder;
+    internal static string outputFolder = configuredOutputFolder;
 
-    // Tolleranze STL (riprese identiche dal journal originale)
-    private static readonly double chordalTol   = 0.0025;
-    private static readonly double adjacencyTol = 0.08;
-    private static readonly double angularTol   = 5.0;
+    // Tolleranze STL: valori di default, modificabili dal pannello "Opzioni
+    // avanzate" di LauncherForm (vedi ApplyAdvancedOptions) subito prima di
+    // ogni esecuzione. Non piu' readonly per questo motivo.
+    internal static double chordalTol   = 0.0025;
+    internal static double adjacencyTol = 0.08;
+    internal static double angularTol   = 5.0;
 
     // true  = esporta anche i corpi NON solidi (superfici aperte/sheet) in una
     //         sottocartella dedicata dentro l'output, ben identificati nel nome
     // false = i corpi non solidi vengono ignorati
-    private static readonly bool exportNotClosedMeshes = true;
+    // Anche questo modificabile dal pannello "Opzioni avanzate".
+    internal static bool exportNotClosedMeshes = true;
 
     // Nome della sottocartella dove finiscono i corpi non chiusi: quando la
     // sorgente non e' raggruppata, e' direttamente dentro la cartella di
@@ -578,30 +930,100 @@ public class NXJournal
     // e a scrivere nella Listing Window, esattamente come prima.
     private static string logFilePath = null;
 
+    // Form di avanzamento attivo (se presente): quando non null, Log() vi
+    // rispecchia ogni riga in tempo reale e ReportProgress() ne aggiorna la
+    // barra di avanzamento. Impostato/azzerato da LauncherForm.StartConversion.
+    internal static LauncherForm ActiveProgressForm = null;
+
+    // Flag cooperativo impostato dal bottone "Annulla" del pannello di
+    // avanzamento: controllato da RunBatch a inizio di ogni file STEP (mai a
+    // meta' esportazione), cosi' l'interruzione avviene sempre a un confine
+    // sicuro tra un file e il successivo.
+    internal static volatile bool CancelRequested = false;
+
+    // Risultato di un'esecuzione di RunBatch: i conteggi erano gia' tutti
+    // calcolati a fine metodo (variabili locali), qui vengono solo raccolti
+    // in un oggetto cosi' che LauncherForm possa mostrarli nel riepilogo
+    // finale invece che solo nella Listing Window.
+    internal class BatchResult
+    {
+        public int TotalSteps;
+        public int Ok;
+        public int Failed;
+        public int CompOk;
+        public int CompFailed;
+        public int GrandSolidBodies;
+        public int GrandOpenBodies;
+        public int GrandFiles;
+        public int GrandSkippedFiles;
+        public string OutputFolder;
+        public string ErrorLogPath;
+        public bool Cancelled;
+        public string FatalError; // null = nessun errore fatale (non di singolo file)
+    }
+
+    // Applica le opzioni scelte nel pannello "Opzioni avanzate" della GUI
+    // (o i valori di default, se il pannello non e' mai stato aperto) prima
+    // di avviare una conversione.
+    internal static void ApplyAdvancedOptions(double chordal, double adjacency, double angular, bool exportOpenBodies)
+    {
+        chordalTol = chordal;
+        adjacencyTol = adjacency;
+        angularTol = angular;
+        exportNotClosedMeshes = exportOpenBodies;
+    }
+
+    // Chiamato da RunBatch a inizio di ogni file STEP: aggiorna la barra di
+    // avanzamento del form attivo, se presente. Avvolto in try/catch come
+    // tutte le altre interazioni con la GUI in questo file.
+    internal static void ReportProgress(int current, int total, string label)
+    {
+        if (ActiveProgressForm == null)
+        {
+            return;
+        }
+        try
+        {
+            ActiveProgressForm.SetProgress(current, total, label);
+        }
+        catch (Exception)
+        {
+            // un aggiornamento di progresso mancato non deve bloccare la conversione
+        }
+    }
+
     public static void Main(string[] args)
     {
         Session theSession = Session.GetSession();
         ListingWindow lw = theSession.ListingWindow;
         lw.Open();
 
-        Log(lw, "=== Avvio conversione batch STEP -> STL (v9) ===");
+        Log(lw, "=== Avvio conversione batch STEP -> STL (v10) ===");
 
         TryPreloadCompatibleSystemDrawing();
 
-        // Percorso preferito: finestra grafica vera (LauncherForm). Se in
-        // questo ambiente NX qualunque Form crasha alla creazione (vedi
-        // commento sopra LauncherForm), il try/catch lo rileva e si passa
-        // automaticamente al fallback a soli MessageBox/FolderBrowserDialog
-        // (RunFallbackFlow) - l'utente non deve fare nulla di diverso nei
-        // due casi, il comportamento a valle e' identico.
-        BatchDecision decision;
+        // Percorso preferito: finestra grafica vera (LauncherForm), che ora
+        // gestisce l'INTERO flusso al suo interno (configurazione, eventuale
+        // risoluzione conflitti, avanzamento live e riepilogo finale) senza
+        // mai chiudersi e riaprirsi: la conversione vera e propria viene
+        // avviata direttamente da dentro la finestra (vedi
+        // LauncherForm.StartConversion), non piu' da qui dopo la sua
+        // chiusura. Se in questo ambiente NX qualunque Form crasha alla
+        // creazione (vedi commento sopra LauncherForm), il try/catch lo
+        // rileva e si passa automaticamente al fallback a soli
+        // MessageBox/FolderBrowserDialog (RunFallbackFlow) - in quel caso
+        // pero' non c'e' un pannello di avanzamento dedicato: e' il percorso
+        // di compatibilita' degradata, non l'esperienza primaria.
+        BatchDecision decision = BatchDecision.Stop;
         bool formUiSucceeded = false;
+        bool conversionHandledByForm = false;
         try
         {
-            using (LauncherForm launcher = new LauncherForm(inputFolder, configuredOutputFolder))
+            using (LauncherForm launcher = new LauncherForm(theSession, lw, inputFolder, configuredOutputFolder))
             {
                 launcher.ShowDialog();
                 decision = launcher.ChosenDecision;
+                conversionHandledByForm = launcher.ConversionRan;
                 if (!string.IsNullOrEmpty(launcher.ResultInputFolder))
                 {
                     inputFolder = launcher.ResultInputFolder;
@@ -623,6 +1045,15 @@ public class NXJournal
         if (!formUiSucceeded)
         {
             decision = RunFallbackFlow(lw);
+        }
+
+        if (conversionHandledByForm)
+        {
+            // La conversione e' gia' stata eseguita per intero dentro la
+            // finestra (compresi log incrementale e riepilogo): qui resta
+            // solo da scrivere la rete di sicurezza del log completo.
+            WriteFinalLogSafety();
+            return;
         }
 
         outputFolder = configuredOutputFolder;
@@ -888,12 +1319,15 @@ public class NXJournal
         }
     }
 
-    private static void RunBatch(Session theSession, ListingWindow lw, BatchDecision decision)
+    internal static BatchResult RunBatch(Session theSession, ListingWindow lw, BatchDecision decision)
     {
         if (!Directory.Exists(inputFolder))
         {
             Log(lw, "ERRORE: cartella di input non trovata: " + inputFolder);
-            return;
+            BatchResult notFoundResult = new BatchResult();
+            notFoundResult.OutputFolder = outputFolder;
+            notFoundResult.FatalError = "Cartella di input non trovata: " + inputFolder;
+            return notFoundResult;
         }
 
         // Cartella EFFETTIVA di questo run: in modalita' "Copia in nuova
@@ -971,10 +1405,21 @@ public class NXJournal
         // File STL che NON sono stati sovrascritti perche' gia' esistenti sul disco.
         int grandSkippedFiles = 0;
 
+        bool cancelled = false;
+
         for (int i = 0; i < stepFiles.Count; i++)
         {
+            if (CancelRequested)
+            {
+                cancelled = true;
+                Log(lw, "");
+                Log(lw, string.Format("Annullato dall'utente: interrotto dopo {0} di {1} file STEP.", i, stepFiles.Count));
+                break;
+            }
+
             string stepFile = stepFiles[i];
             string baseName = Path.GetFileNameWithoutExtension(stepFile);
+            ReportProgress(i + 1, stepFiles.Count, string.Format("File {0}/{1}: {2}", i + 1, stepFiles.Count, baseName));
             Log(lw, string.Format("[{0}/{1}] {2}", i + 1, stepFiles.Count, baseName));
 
             // Controllo indice: se questo step e' gia' stato processato come assieme
@@ -1224,6 +1669,23 @@ public class NXJournal
             Log(lw, "");
             Log(lw, "Dettagli errori in: " + errLogPath);
         }
+
+        ReportProgress(stepFiles.Count, stepFiles.Count, cancelled ? "Annullato dall'utente." : "Conversione completata.");
+
+        BatchResult result = new BatchResult();
+        result.TotalSteps = stepFiles.Count;
+        result.Ok = ok;
+        result.Failed = failed;
+        result.CompOk = compOk;
+        result.CompFailed = compFailed;
+        result.GrandSolidBodies = grandSolidBodies;
+        result.GrandOpenBodies = grandOpenBodies;
+        result.GrandFiles = grandFiles;
+        result.GrandSkippedFiles = grandSkippedFiles;
+        result.OutputFolder = outputFolder;
+        result.ErrorLogPath = errLogPath;
+        result.Cancelled = cancelled;
+        return result;
     }
 
     // Elenco ordinato dei file .stp/.step in una cartella. Estratta a parte
@@ -2035,7 +2497,9 @@ public class NXJournal
         }
     }
 
-    private static void Log(ListingWindow lw, string message)
+    // internal (non piu' private): LauncherForm.StartConversion la chiama
+    // direttamente in caso di eccezione fatale durante RunBatch.
+    internal static void Log(ListingWindow lw, string message)
     {
         logLines.Add(message);
         try
@@ -2063,6 +2527,25 @@ public class NXJournal
             {
                 // se anche l'append fallisce, il messaggio resta comunque in
                 // logLines e verra' ritentato nella scrittura finale.
+            }
+        }
+
+        // Rispecchia la riga anche nel pannello di avanzamento della GUI, se
+        // presente, e lascia respirare la finestra (ridisegno, click su
+        // "Annulla") durante il loop sincrono di RunBatch - NXOpen non e'
+        // thread-safe, quindi non si puo' usare un thread separato per la
+        // conversione: Application.DoEvents() e' il modo con cui il resto di
+        // questo file gia' mantiene la GUI reattiva senza multithreading.
+        if (ActiveProgressForm != null)
+        {
+            try
+            {
+                ActiveProgressForm.AppendLogLine(message);
+                Application.DoEvents();
+            }
+            catch (Exception)
+            {
+                // un aggiornamento di log mancato non deve bloccare la conversione
             }
         }
     }
