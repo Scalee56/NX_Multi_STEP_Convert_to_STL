@@ -1,9 +1,22 @@
 // =============================================================================
-// NX Open Journal - Conversione massiva STEP -> STL (v12)
+// NX Open Journal - Conversione massiva STEP -> STL (v13)
 // Basato sul journal originale "journal.cs" (export singolo STL registrato in NX),
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
-// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v12):
+// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v13):
+// - RESTYLING GRAFICO di tutte le finestre della GUI esterna (PowerShell):
+//   font Segoe UI, palette chiara, pulsanti piatti con angoli arrotondati e
+//   colore d'accento al passaggio del mouse, al posto dei controlli WinForms
+//   di default (bordi 3D "vecchio Windows").
+// - TORNATA la finestra di avanzamento in tempo reale con barra di progresso
+//   (era stata rimossa in v12 insieme a LauncherForm): e' di nuovo un
+//   processo powershell.exe separato, avviato senza bloccare la conversione,
+//   che mostra file corrente, percentuale, conteggio riusciti/falliti e un
+//   pulsante Annulla (scrive lo stesso marker CANCEL.txt gia' in uso). Si
+//   aggiorna leggendo un file di stato scritto ad ogni file STEP processato,
+//   e si chiude da sola a fine conversione.
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v12:
 // - RIMOSSA definitivamente LauncherForm (System.Windows.Forms.Form): confermato
 //   su questa installazione NX, anche a sessione appena riavviata e con ogni
 //   mitigazione provata, che nessuna Form puo' mai aprirsi qui (mismatch
@@ -352,7 +365,7 @@ public class NXJournal
         ListingWindow lw = theSession.ListingWindow;
         lw.Open();
 
-        Log(lw, "=== Avvio conversione batch STEP -> STL (v12) ===");
+        Log(lw, "=== Avvio conversione batch STEP -> STL (v13) ===");
 
         // Percorso preferito: GUI vera mostrata da un processo powershell.exe
         // separato (vedi RunExternalGuiFlow) - configurazione cartelle,
@@ -412,14 +425,14 @@ public class NXJournal
         CleanUpExternalGuiWorkDir();
     }
 
-    // Script PowerShell della GUI esterna: un unico file con tre "stage"
-    // (Config / Decision / Summary, scelti con il parametro -Stage), scritto
-    // su disco una volta per run e rilanciato fino a 3 volte in processi
-    // powershell.exe separati (vedi RunPowerShellStage). Ogni stage legge il
-    // proprio file di input e scrive il proprio file di output dentro
-    // -WorkDir, in un formato "chiave=valore" volutamente elementare (niente
-    // libreria JSON necessaria su nessuno dei due lati). Tutti i numeri sono
-    // sempre formattati/parsati con cultura invariante (punto come separatore
+    // Script PowerShell della GUI esterna: un unico file con quattro "stage"
+    // (Config / Decision / Progress / Summary, scelti con il parametro -Stage),
+    // scritto su disco una volta per run e rilanciato in processi powershell.exe
+    // separati (vedi RunPowerShellStage e StartPowerShellProgressWindow). Ogni
+    // stage legge il proprio file di input e scrive il proprio file di output
+    // dentro -WorkDir, in un formato "chiave=valore" volutamente elementare
+    // (niente libreria JSON necessaria su nessuno dei due lati). Tutti i numeri
+    // sono sempre formattati/parsati con cultura invariante (punto come separatore
     // decimale), per non dipendere dalle impostazioni regionali della
     // macchina (es. virgola invece di punto con Windows in italiano).
     private static readonly string ExternalGuiScriptSource =
@@ -432,6 +445,107 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
 $ic = [System.Globalization.CultureInfo]::InvariantCulture
+
+# --- Palette e stile condivisi da tutte le finestre (look chiaro e piatto, stile ""Apple"") ---
+$ClrWindowBg   = [System.Drawing.Color]::FromArgb(246, 246, 248)
+$ClrCardBg     = [System.Drawing.Color]::White
+$ClrText       = [System.Drawing.Color]::FromArgb(29, 29, 31)
+$ClrSubtext    = [System.Drawing.Color]::FromArgb(110, 110, 115)
+$ClrBorder     = [System.Drawing.Color]::FromArgb(216, 216, 220)
+$ClrAccent     = [System.Drawing.Color]::FromArgb(0, 122, 255)
+$ClrAccentDark = [System.Drawing.Color]::FromArgb(0, 100, 220)
+$ClrTrack      = [System.Drawing.Color]::FromArgb(228, 228, 232)
+
+$FontBase   = New-Object System.Drawing.Font(""Segoe UI"", 9.5)
+$FontTitle  = New-Object System.Drawing.Font(""Segoe UI"", 13, [System.Drawing.FontStyle]::Bold)
+$FontSmall  = New-Object System.Drawing.Font(""Segoe UI"", 8.75)
+$FontButton = New-Object System.Drawing.Font(""Segoe UI"", 9.5, [System.Drawing.FontStyle]::Bold)
+
+# Regione con angoli arrotondati, usata per dare ai pulsanti e alla barra di
+# avanzamento un aspetto piu' morbido del rettangolo vivo di default di WinForms.
+function New-RoundedRegion($w, $h, $r) {
+    $d = $r * 2
+    if ($d -gt $w) { $d = $w }
+    if ($d -gt $h) { $d = $h }
+    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $path.AddArc(0, 0, $d, $d, 180, 90)
+    $path.AddArc($w - $d, 0, $d, $d, 270, 90)
+    $path.AddArc($w - $d, $h - $d, $d, $d, 0, 90)
+    $path.AddArc(0, $h - $d, $d, $d, 90, 90)
+    $path.CloseFigure()
+    return New-Object System.Drawing.Region($path)
+}
+
+function Style-Form($form) {
+    $form.BackColor = $ClrWindowBg
+    $form.Font = $FontBase
+}
+
+function Add-Separator($form, $x, $y, $w) {
+    $sep = New-Object System.Windows.Forms.Panel
+    $sep.SetBounds($x, $y, $w, 1)
+    $sep.BackColor = $ClrBorder
+    $form.Controls.Add($sep)
+}
+
+function Style-TitleLabel($lbl) {
+    $lbl.Font = $FontTitle
+    $lbl.ForeColor = $ClrText
+}
+
+function Style-Label($lbl) {
+    $lbl.Font = $FontBase
+    $lbl.ForeColor = $ClrText
+}
+
+function Style-SubLabel($lbl) {
+    $lbl.Font = $FontSmall
+    $lbl.ForeColor = $ClrSubtext
+}
+
+function Style-TextBox($txt) {
+    $txt.Font = $FontBase
+    $txt.BorderStyle = ""FixedSingle""
+    $txt.BackColor = $ClrCardBg
+    $txt.ForeColor = $ClrText
+}
+
+function Style-NumericUpDown($num) {
+    $num.Font = $FontBase
+    $num.BorderStyle = ""FixedSingle""
+    $num.BackColor = $ClrCardBg
+    $num.ForeColor = $ClrText
+}
+
+function Style-CheckBox($chk) {
+    $chk.Font = $FontBase
+    $chk.ForeColor = $ClrText
+}
+
+function Style-PrimaryButton($btn) {
+    $btn.FlatStyle = ""Flat""
+    $btn.FlatAppearance.BorderSize = 0
+    $btn.BackColor = $ClrAccent
+    $btn.ForeColor = [System.Drawing.Color]::White
+    $btn.Font = $FontButton
+    $btn.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btn.Region = New-RoundedRegion $btn.Width $btn.Height 8
+    $btn.Add_MouseEnter({ $this.BackColor = $ClrAccentDark })
+    $btn.Add_MouseLeave({ $this.BackColor = $ClrAccent })
+}
+
+function Style-SecondaryButton($btn) {
+    $btn.FlatStyle = ""Flat""
+    $btn.FlatAppearance.BorderSize = 1
+    $btn.FlatAppearance.BorderColor = $ClrBorder
+    $btn.BackColor = $ClrCardBg
+    $btn.ForeColor = $ClrText
+    $btn.Font = $FontButton
+    $btn.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btn.Region = New-RoundedRegion $btn.Width $btn.Height 8
+    $btn.Add_MouseEnter({ $this.BackColor = $ClrTrack })
+    $btn.Add_MouseLeave({ $this.BackColor = $ClrCardBg })
+}
 
 function Read-KeyValueFile($path) {
     $result = @{}
@@ -471,131 +585,158 @@ switch ($Stage) {
 
         $form = New-Object System.Windows.Forms.Form
         $form.Text = ""Conversione batch STEP -> STL""
-        $form.Width = 640
-        $form.Height = 440
+        $form.Width = 660
+        $form.Height = 490
         $form.StartPosition = ""CenterScreen""
         $form.FormBorderStyle = ""FixedDialog""
         $form.MinimizeBox = $false
         $form.MaximizeBox = $false
         $form.Topmost = $true
+        Style-Form $form
+
+        $lblTitle = New-Object System.Windows.Forms.Label
+        $lblTitle.Text = ""Conversione batch STEP -> STL""
+        $lblTitle.SetBounds(24, 20, 580, 30)
+        Style-TitleLabel $lblTitle
+        $form.Controls.Add($lblTitle)
+
+        Add-Separator $form 24 58 600
 
         $lblIn = New-Object System.Windows.Forms.Label
         $lblIn.Text = ""Cartella di input (file STEP):""
-        $lblIn.SetBounds(20, 20, 580, 20)
+        $lblIn.SetBounds(24, 74, 580, 20)
+        Style-Label $lblIn
         $form.Controls.Add($lblIn)
 
         $txtIn = New-Object System.Windows.Forms.TextBox
-        $txtIn.SetBounds(20, 42, 500, 24)
+        $txtIn.SetBounds(24, 98, 500, 26)
         $txtIn.Text = $cfg[""InputFolder""]
+        Style-TextBox $txtIn
         $form.Controls.Add($txtIn)
 
         $btnBrowseIn = New-Object System.Windows.Forms.Button
-        $btnBrowseIn.Text = ""Sfoglia...""
-        $btnBrowseIn.SetBounds(530, 41, 90, 26)
+        $btnBrowseIn.Text = ""Sfoglia""
+        $btnBrowseIn.SetBounds(536, 96, 88, 30)
+        $form.Controls.Add($btnBrowseIn)
+        Style-SecondaryButton $btnBrowseIn
         $btnBrowseIn.Add_Click({
             $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
             if (Test-Path -LiteralPath $txtIn.Text) { $dlg.SelectedPath = $txtIn.Text }
             if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtIn.Text = $dlg.SelectedPath }
         })
-        $form.Controls.Add($btnBrowseIn)
 
         $lblOut = New-Object System.Windows.Forms.Label
         $lblOut.Text = ""Cartella di output (file STL):""
-        $lblOut.SetBounds(20, 80, 580, 20)
+        $lblOut.SetBounds(24, 138, 580, 20)
+        Style-Label $lblOut
         $form.Controls.Add($lblOut)
 
         $txtOut = New-Object System.Windows.Forms.TextBox
-        $txtOut.SetBounds(20, 102, 500, 24)
+        $txtOut.SetBounds(24, 162, 500, 26)
         $txtOut.Text = $cfg[""OutputFolder""]
+        Style-TextBox $txtOut
         $form.Controls.Add($txtOut)
 
         $btnBrowseOut = New-Object System.Windows.Forms.Button
-        $btnBrowseOut.Text = ""Sfoglia...""
-        $btnBrowseOut.SetBounds(530, 101, 90, 26)
+        $btnBrowseOut.Text = ""Sfoglia""
+        $btnBrowseOut.SetBounds(536, 160, 88, 30)
+        $form.Controls.Add($btnBrowseOut)
+        Style-SecondaryButton $btnBrowseOut
         $btnBrowseOut.Add_Click({
             $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
             if (Test-Path -LiteralPath $txtOut.Text) { $dlg.SelectedPath = $txtOut.Text }
             if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtOut.Text = $dlg.SelectedPath }
         })
-        $form.Controls.Add($btnBrowseOut)
 
         $lblInfo = New-Object System.Windows.Forms.Label
         $lblInfo.Text = ""La scansione confronta i file STEP di input con gli STL gia' presenti in output, senza aprire NX. Se non trova conflitti la conversione parte subito.""
-        $lblInfo.SetBounds(20, 136, 600, 40)
+        $lblInfo.SetBounds(24, 198, 600, 40)
+        Style-SubLabel $lblInfo
         $form.Controls.Add($lblInfo)
 
         $chkAdvanced = New-Object System.Windows.Forms.CheckBox
         $chkAdvanced.Text = ""Mostra opzioni avanzate (tolleranze STL, superfici non chiuse)""
-        $chkAdvanced.SetBounds(20, 182, 420, 22)
+        $chkAdvanced.SetBounds(24, 244, 460, 22)
+        Style-CheckBox $chkAdvanced
         $form.Controls.Add($chkAdvanced)
 
         $panelAdv = New-Object System.Windows.Forms.Panel
-        $panelAdv.SetBounds(20, 208, 600, 110)
+        $panelAdv.SetBounds(24, 270, 600, 110)
         $panelAdv.Visible = $false
+        $panelAdv.BackColor = $ClrWindowBg
         $form.Controls.Add($panelAdv)
 
         $lblChordal = New-Object System.Windows.Forms.Label
         $lblChordal.Text = ""Tolleranza chordal:""
         $lblChordal.SetBounds(0, 4, 160, 20)
+        Style-Label $lblChordal
         $panelAdv.Controls.Add($lblChordal)
 
         $numChordal = New-Object System.Windows.Forms.NumericUpDown
-        $numChordal.SetBounds(170, 2, 100, 22)
+        $numChordal.SetBounds(170, 2, 100, 24)
         $numChordal.DecimalPlaces = 4
         $numChordal.Increment = 0.0005
         $numChordal.Minimum = 0.0001
         $numChordal.Maximum = 10
         $numChordal.Value = [decimal](Parse-Double $cfg[""ChordalTol""] 0.0025)
+        Style-NumericUpDown $numChordal
         $panelAdv.Controls.Add($numChordal)
 
         $lblAdj = New-Object System.Windows.Forms.Label
         $lblAdj.Text = ""Tolleranza adjacency:""
         $lblAdj.SetBounds(0, 36, 160, 20)
+        Style-Label $lblAdj
         $panelAdv.Controls.Add($lblAdj)
 
         $numAdj = New-Object System.Windows.Forms.NumericUpDown
-        $numAdj.SetBounds(170, 34, 100, 22)
+        $numAdj.SetBounds(170, 34, 100, 24)
         $numAdj.DecimalPlaces = 3
         $numAdj.Increment = 0.01
         $numAdj.Minimum = 0.001
         $numAdj.Maximum = 100
         $numAdj.Value = [decimal](Parse-Double $cfg[""AdjacencyTol""] 0.08)
+        Style-NumericUpDown $numAdj
         $panelAdv.Controls.Add($numAdj)
 
         $lblAng = New-Object System.Windows.Forms.Label
         $lblAng.Text = ""Tolleranza angular:""
         $lblAng.SetBounds(0, 68, 160, 20)
+        Style-Label $lblAng
         $panelAdv.Controls.Add($lblAng)
 
         $numAng = New-Object System.Windows.Forms.NumericUpDown
-        $numAng.SetBounds(170, 66, 100, 22)
+        $numAng.SetBounds(170, 66, 100, 24)
         $numAng.DecimalPlaces = 1
         $numAng.Increment = 0.5
         $numAng.Minimum = 0.1
         $numAng.Maximum = 90
         $numAng.Value = [decimal](Parse-Double $cfg[""AngularTol""] 5.0)
+        Style-NumericUpDown $numAng
         $panelAdv.Controls.Add($numAng)
 
         $chkExportOpen = New-Object System.Windows.Forms.CheckBox
         $chkExportOpen.Text = ""Esporta anche i corpi non chiusi (superfici aperte)""
         $chkExportOpen.SetBounds(0, 92, 460, 22)
         $chkExportOpen.Checked = ($cfg[""ExportNotClosed""] -ne ""0"")
+        Style-CheckBox $chkExportOpen
         $panelAdv.Controls.Add($chkExportOpen)
 
         $chkAdvanced.Add_CheckedChanged({ $panelAdv.Visible = $chkAdvanced.Checked })
 
         $btnScan = New-Object System.Windows.Forms.Button
         $btnScan.Text = ""Avvia scansione""
-        $btnScan.SetBounds(20, 350, 170, 36)
+        $btnScan.SetBounds(24, 410, 190, 40)
         $btnScan.DialogResult = [System.Windows.Forms.DialogResult]::OK
         $form.Controls.Add($btnScan)
+        Style-PrimaryButton $btnScan
         $form.AcceptButton = $btnScan
 
         $btnCancel = New-Object System.Windows.Forms.Button
         $btnCancel.Text = ""Annulla""
-        $btnCancel.SetBounds(450, 350, 170, 36)
+        $btnCancel.SetBounds(470, 410, 150, 40)
         $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
         $form.Controls.Add($btnCancel)
+        Style-SecondaryButton $btnCancel
         $form.CancelButton = $btnCancel
 
         $result = $form.ShowDialog()
@@ -624,36 +765,49 @@ switch ($Stage) {
 
         $form = New-Object System.Windows.Forms.Form
         $form.Text = ""Trovati conflitti - come procedere?""
-        $form.Width = 640
-        $form.Height = 480
+        $form.Width = 660
+        $form.Height = 520
         $form.StartPosition = ""CenterScreen""
         $form.FormBorderStyle = ""FixedDialog""
         $form.MinimizeBox = $false
         $form.MaximizeBox = $false
         $form.Topmost = $true
+        Style-Form $form
+
+        $lblTitle = New-Object System.Windows.Forms.Label
+        $lblTitle.Text = ""Trovati conflitti - come procedere?""
+        $lblTitle.SetBounds(24, 20, 600, 30)
+        Style-TitleLabel $lblTitle
+        $form.Controls.Add($lblTitle)
+
+        Add-Separator $form 24 58 600
 
         $txtSummary = New-Object System.Windows.Forms.TextBox
         $txtSummary.Multiline = $true
         $txtSummary.ReadOnly = $true
         $txtSummary.ScrollBars = ""Vertical""
-        $txtSummary.SetBounds(20, 20, 580, 330)
+        $txtSummary.SetBounds(24, 74, 600, 330)
         $txtSummary.Text = $summaryText
+        Style-TextBox $txtSummary
         $form.Controls.Add($txtSummary)
 
         $btnOverwrite = New-Object System.Windows.Forms.Button
         $btnOverwrite.Text = ""Sovrascrivi""
-        $btnOverwrite.SetBounds(20, 370, 175, 40)
+        $btnOverwrite.SetBounds(24, 424, 185, 42)
         $form.Controls.Add($btnOverwrite)
+        Style-PrimaryButton $btnOverwrite
 
         $btnCopy = New-Object System.Windows.Forms.Button
         $btnCopy.Text = ""Copia in nuova cartella""
-        $btnCopy.SetBounds(215, 370, 195, 40)
+        $btnCopy.SetBounds(222, 424, 205, 42)
         $form.Controls.Add($btnCopy)
+        Style-SecondaryButton $btnCopy
 
         $btnStop = New-Object System.Windows.Forms.Button
         $btnStop.Text = ""Interrompi""
-        $btnStop.SetBounds(430, 370, 170, 40)
+        $btnStop.SetBounds(440, 424, 184, 42)
         $form.Controls.Add($btnStop)
+        Style-SecondaryButton $btnStop
 
         $script:decision = ""Stop""
         $btnOverwrite.Add_Click({ $script:decision = ""Overwrite""; $form.Close() })
@@ -663,6 +817,131 @@ switch ($Stage) {
         [void]$form.ShowDialog()
 
         Write-KeyValueFile $outputFile @{ ""Decision"" = $script:decision }
+    }
+    ""Progress"" {
+        $metaFile = Join-Path $WorkDir ""progress_meta.txt""
+        $statusFile = Join-Path $WorkDir ""progress_status.txt""
+        $meta = Read-KeyValueFile $metaFile
+        $outFolder = $meta[""OutputFolder""]
+        $totalInitial = 0
+        [int]::TryParse($meta[""Total""], [ref]$totalInitial) | Out-Null
+
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = ""Conversione in corso...""
+        $form.Width = 560
+        $form.Height = 270
+        $form.StartPosition = ""CenterScreen""
+        $form.FormBorderStyle = ""FixedDialog""
+        $form.MinimizeBox = $false
+        $form.MaximizeBox = $false
+        $form.Topmost = $true
+        Style-Form $form
+
+        $lblTitle = New-Object System.Windows.Forms.Label
+        $lblTitle.Text = ""Conversione STEP -> STL in corso""
+        $lblTitle.SetBounds(24, 20, 500, 30)
+        Style-TitleLabel $lblTitle
+        $form.Controls.Add($lblTitle)
+
+        Add-Separator $form 24 58 500
+
+        $lblFile = New-Object System.Windows.Forms.Label
+        $lblFile.Text = ""Preparazione...""
+        $lblFile.SetBounds(24, 76, 500, 20)
+        $lblFile.AutoEllipsis = $true
+        Style-Label $lblFile
+        $form.Controls.Add($lblFile)
+
+        $pnlTrack = New-Object System.Windows.Forms.Panel
+        $pnlTrack.SetBounds(24, 108, 496, 14)
+        $pnlTrack.BackColor = $ClrTrack
+        $pnlTrack.Region = New-RoundedRegion $pnlTrack.Width $pnlTrack.Height 7
+        $form.Controls.Add($pnlTrack)
+
+        $pnlFill = New-Object System.Windows.Forms.Panel
+        $pnlFill.SetBounds(0, 0, 2, 14)
+        $pnlFill.BackColor = $ClrAccent
+        $pnlFill.Region = New-RoundedRegion 2 14 7
+        $pnlTrack.Controls.Add($pnlFill)
+
+        $lblCount = New-Object System.Windows.Forms.Label
+        $lblCount.Text = (""0 di {0} completati"" -f $totalInitial)
+        $lblCount.SetBounds(24, 132, 300, 20)
+        Style-SubLabel $lblCount
+        $form.Controls.Add($lblCount)
+
+        $lblStats = New-Object System.Windows.Forms.Label
+        $lblStats.Text = """"
+        $lblStats.SetBounds(24, 154, 496, 20)
+        Style-SubLabel $lblStats
+        $form.Controls.Add($lblStats)
+
+        $btnCancel = New-Object System.Windows.Forms.Button
+        $btnCancel.Text = ""Annulla""
+        $btnCancel.SetBounds(370, 190, 150, 40)
+        $form.Controls.Add($btnCancel)
+        Style-SecondaryButton $btnCancel
+
+        $script:cancelRequested = $false
+        $btnCancel.Add_Click({
+            $script:cancelRequested = $true
+            $btnCancel.Enabled = $false
+            $btnCancel.Text = ""Annullamento...""
+            if (-not [string]::IsNullOrEmpty($outFolder)) {
+                try {
+                    if (-not (Test-Path -LiteralPath $outFolder)) { New-Item -ItemType Directory -Path $outFolder -Force | Out-Null }
+                    Set-Content -LiteralPath (Join-Path $outFolder ""CANCEL.txt"") -Value ""cancel"" -Encoding UTF8
+                } catch {
+                }
+            }
+        })
+
+        $timer = New-Object System.Windows.Forms.Timer
+        $timer.Interval = 350
+        $timer.Add_Tick({
+            $st = Read-KeyValueFile $statusFile
+            if ($st.Count -eq 0) { return }
+
+            $cur = 0
+            $tot = $totalInitial
+            $okCount = 0
+            $failCount = 0
+            [int]::TryParse($st[""Current""], [ref]$cur) | Out-Null
+            [int]::TryParse($st[""Total""], [ref]$tot) | Out-Null
+            [int]::TryParse($st[""Ok""], [ref]$okCount) | Out-Null
+            [int]::TryParse($st[""Failed""], [ref]$failCount) | Out-Null
+            $fileName = $st[""FileName""]
+
+            $totForPct = $tot
+            if ($totForPct -le 0) { $totForPct = 1 }
+            $pct = [double]$cur / [double]$totForPct
+            if ($pct -lt 0) { $pct = 0 }
+            if ($pct -gt 1) { $pct = 1 }
+
+            $fillWidth = [int]($pnlTrack.Width * $pct)
+            if ($fillWidth -lt 2) { $fillWidth = 2 }
+            if ($fillWidth -gt $pnlTrack.Width) { $fillWidth = $pnlTrack.Width }
+            $pnlFill.Width = $fillWidth
+            $pnlFill.Region = New-RoundedRegion $fillWidth $pnlFill.Height 7
+
+            if ([string]::IsNullOrEmpty($fileName)) {
+                $lblFile.Text = ""Elaborazione in corso...""
+            } else {
+                $lblFile.Text = (""In elaborazione: {0}"" -f $fileName)
+            }
+            $lblCount.Text = (""{0} di {1} completati ({2}%)"" -f $cur, $tot, [int]($pct * 100))
+            $lblStats.Text = (""Riusciti: {0}    Falliti: {1}"" -f $okCount, $failCount)
+
+            if ($st[""Done""] -eq ""1"") {
+                $timer.Stop()
+                $form.Close()
+            }
+        })
+        $timer.Start()
+
+        [void]$form.ShowDialog()
+        $timer.Stop()
+        $timer.Dispose()
     }
     ""Summary"" {
         $inputFile = Join-Path $WorkDir ""summary_input.txt""
@@ -676,35 +955,47 @@ switch ($Stage) {
 
         $form = New-Object System.Windows.Forms.Form
         $form.Text = ""Conversione completata""
-        $form.Width = 600
-        $form.Height = 420
+        $form.Width = 620
+        $form.Height = 460
         $form.StartPosition = ""CenterScreen""
         $form.FormBorderStyle = ""FixedDialog""
         $form.MinimizeBox = $false
         $form.MaximizeBox = $false
         $form.Topmost = $true
+        Style-Form $form
+
+        $lblTitle = New-Object System.Windows.Forms.Label
+        $lblTitle.Text = ""Conversione completata""
+        $lblTitle.SetBounds(24, 20, 560, 30)
+        Style-TitleLabel $lblTitle
+        $form.Controls.Add($lblTitle)
+
+        Add-Separator $form 24 58 560
 
         $txt = New-Object System.Windows.Forms.TextBox
         $txt.Multiline = $true
         $txt.ReadOnly = $true
         $txt.ScrollBars = ""Vertical""
-        $txt.SetBounds(20, 20, 540, 280)
+        $txt.SetBounds(24, 74, 560, 280)
         $txt.Text = $summaryText
+        Style-TextBox $txt
         $form.Controls.Add($txt)
 
         $btnOpen = New-Object System.Windows.Forms.Button
         $btnOpen.Text = ""Apri cartella di output""
-        $btnOpen.SetBounds(20, 320, 220, 38)
+        $btnOpen.SetBounds(24, 368, 230, 42)
+        $form.Controls.Add($btnOpen)
+        Style-SecondaryButton $btnOpen
         $btnOpen.Add_Click({
             if (Test-Path -LiteralPath $outFolder) { Start-Process -FilePath ""explorer.exe"" -ArgumentList @($outFolder) }
         })
-        $form.Controls.Add($btnOpen)
 
         $btnClose = New-Object System.Windows.Forms.Button
         $btnClose.Text = ""Chiudi""
-        $btnClose.SetBounds(400, 320, 160, 38)
-        $btnClose.Add_Click({ $form.Close() })
+        $btnClose.SetBounds(414, 368, 170, 42)
         $form.Controls.Add($btnClose)
+        Style-PrimaryButton $btnClose
+        $btnClose.Add_Click({ $form.Close() })
         $form.AcceptButton = $btnClose
 
         [void]$form.ShowDialog()
@@ -930,6 +1221,47 @@ switch ($Stage) {
         if (expectedOutputFile != null && !File.Exists(expectedOutputFile))
         {
             throw new Exception("La GUI esterna non ha prodotto il file di risposta atteso per lo stage " + stage + ".");
+        }
+    }
+
+    // Avvia lo stage "Progress" della GUI esterna come processo powershell.exe
+    // SEPARATO, ma - a differenza di RunPowerShellStage - senza attendere che
+    // termini (niente WaitForExit): il batch deve continuare a girare e ad
+    // aggiornare periodicamente il file di stato (vedi WriteProgressStatus)
+    // mentre la finestra resta aperta. La finestra si chiude da sola quando
+    // vi legge Done=1 nel file di stato.
+    private static Process StartPowerShellProgressWindow(string scriptPath, string workDir)
+    {
+        ProcessStartInfo psi = new ProcessStartInfo();
+        psi.FileName = "powershell.exe";
+        psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" +
+            scriptPath + "\" -Stage Progress -WorkDir \"" + workDir + "\"";
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        return Process.Start(psi);
+    }
+
+    // Scrive lo stato di avanzamento corrente nel formato chiave=valore che lo
+    // stage "Progress" della GUI esterna legge periodicamente (vedi il timer
+    // nello script PowerShell). Best-effort: un fallimento qui (es. file
+    // temporaneamente bloccato) non deve mai interrompere la conversione,
+    // che e' la parte che conta davvero.
+    private static void WriteProgressStatus(string path, int current, int total, string fileName, int ok, int failed, bool done)
+    {
+        try
+        {
+            Dictionary<string, string> status = new Dictionary<string, string>();
+            status["Current"] = current.ToString(CultureInfo.InvariantCulture);
+            status["Total"] = total.ToString(CultureInfo.InvariantCulture);
+            status["FileName"] = fileName ?? "";
+            status["Ok"] = ok.ToString(CultureInfo.InvariantCulture);
+            status["Failed"] = failed.ToString(CultureInfo.InvariantCulture);
+            status["Done"] = done ? "1" : "0";
+            WriteKeyValueFile(path, status);
+        }
+        catch (Exception)
+        {
+            // aggiornamento di avanzamento best-effort: un fallimento qui non deve fermare la conversione
         }
     }
 
@@ -1332,8 +1664,48 @@ switch ($Stage) {
 
         bool cancelled = false;
 
+        // Finestra di avanzamento con barra di progresso "live": mostrata solo
+        // se la GUI esterna (PowerShell) e' quella in uso per questo run (vedi
+        // RunExternalGuiFlow). E' un processo powershell.exe SEPARATO, avviato
+        // qui in modo NON bloccante (a differenza di RunPowerShellStage), che
+        // legge periodicamente il file di stato scritto ad ogni file STEP
+        // processato (vedi WriteProgressStatus) e chiude da solo la finestra
+        // quando vi legge Done=1. Qualunque problema nell'avviarla e' non
+        // fatale: la conversione procede comunque, semplicemente senza la
+        // finestra di avanzamento.
+        bool showProgressWindow = !string.IsNullOrEmpty(externalGuiWorkDir)
+            && !string.IsNullOrEmpty(externalGuiScriptPath)
+            && stepFiles.Count > 0;
+        string progressStatusPath = null;
+        Process progressProcess = null;
+        if (showProgressWindow)
+        {
+            try
+            {
+                progressStatusPath = Path.Combine(externalGuiWorkDir, "progress_status.txt");
+                Dictionary<string, string> progressMeta = new Dictionary<string, string>();
+                progressMeta["OutputFolder"] = outputFolder;
+                progressMeta["Total"] = stepFiles.Count.ToString(CultureInfo.InvariantCulture);
+                WriteKeyValueFile(Path.Combine(externalGuiWorkDir, "progress_meta.txt"), progressMeta);
+                WriteProgressStatus(progressStatusPath, 0, stepFiles.Count, "", 0, 0, false);
+                progressProcess = StartPowerShellProgressWindow(externalGuiScriptPath, externalGuiWorkDir);
+            }
+            catch (Exception)
+            {
+                showProgressWindow = false;
+                progressProcess = null;
+            }
+        }
+
+        try
+        {
         for (int i = 0; i < stepFiles.Count; i++)
         {
+            if (showProgressWindow)
+            {
+                WriteProgressStatus(progressStatusPath, i, stepFiles.Count, Path.GetFileNameWithoutExtension(stepFiles[i]), ok, failed, false);
+            }
+
             if (File.Exists(cancelMarkerPath))
             {
                 cancelled = true;
@@ -1575,6 +1947,19 @@ switch ($Stage) {
             }
 
             Log(lw, "");
+        }
+        }
+        finally
+        {
+            if (showProgressWindow)
+            {
+                WriteProgressStatus(progressStatusPath, ok + failed, stepFiles.Count, "", ok, failed, true);
+                if (progressProcess != null)
+                {
+                    try { progressProcess.WaitForExit(4000); }
+                    catch (Exception) { /* best-effort: la pulizia finale non dipende da questo */ }
+                }
+            }
         }
 
         Log(lw, "");
