@@ -1,9 +1,23 @@
 // =============================================================================
-// NX Open Journal - Conversione massiva STEP -> STL (v13)
+// NX Open Journal - Conversione massiva STEP -> STL (v14)
 // Basato sul journal originale "journal.cs" (export singolo STL registrato in NX),
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
-// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v13):
+// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v14):
+// - ULTERIORE RIFINITURA GRAFICA della GUI esterna: gruppi di campi racchiusi
+//   in "card" bianche con angoli arrotondati su sfondo grigio chiaro (stile
+//   pannelli di Impostazioni di macOS), dissolvenza in apertura per tutte le
+//   finestre, e barra di avanzamento che ora scorre con un'animazione fluida
+//   verso la percentuale corrente invece di scattare di colpo.
+// - OTTIMIZZAZIONE VELOCITA': il file di log incrementale (log_conversione.txt)
+//   veniva riaperto e richiuso ad ogni singola riga scritta durante il batch
+//   (File.AppendAllText). Ora l'handle resta aperto per tutta la conversione
+//   (con Flush() dopo ogni riga per mantenere la stessa protezione in caso di
+//   crash): elimina un overhead di apertura/chiusura file per ogni riga di
+//   log, piu' evidente su cartelle di rete o con antivirus che intercetta
+//   ogni apertura file.
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v13:
 // - RESTYLING GRAFICO di tutte le finestre della GUI esterna (PowerShell):
 //   font Segoe UI, palette chiara, pulsanti piatti con angoli arrotondati e
 //   colore d'accento al passaggio del mouse, al posto dei controlli WinForms
@@ -317,6 +331,17 @@ public class NXJournal
     // e a scrivere nella Listing Window, esattamente come prima.
     private static string logFilePath = null;
 
+    // StreamWriter tenuto aperto per tutta la durata del batch, cosi' che
+    // Log() non debba piu' aprire e richiudere il file ad ogni singola riga
+    // (File.AppendAllText apriva/chiudeva l'handle ad ogni chiamata: su
+    // centinaia di file, con diverse righe di log ciascuno, il solo overhead
+    // di apertura/chiusura - specialmente su cartelle di rete o con antivirus
+    // che intercetta ogni apertura file - poteva diventare un rallentamento
+    // misurabile). Il Flush() dopo ogni riga mantiene la stessa garanzia di
+    // "log leggibile anche in caso di crash" che si aveva prima, senza
+    // ripagare il costo di un open/close per riga.
+    private static StreamWriter logWriter = null;
+
     // Cartella temporanea creata per lo scambio di file con il processo
     // powershell.exe della GUI esterna (vedi RunExternalGuiFlow), e percorso
     // dello script .ps1 scritto al suo interno. Restano valorizzati per
@@ -365,7 +390,7 @@ public class NXJournal
         ListingWindow lw = theSession.ListingWindow;
         lw.Open();
 
-        Log(lw, "=== Avvio conversione batch STEP -> STL (v13) ===");
+        Log(lw, "=== Avvio conversione batch STEP -> STL (v14) ===");
 
         // Percorso preferito: GUI vera mostrata da un processo powershell.exe
         // separato (vedi RunExternalGuiFlow) - configurazione cartelle,
@@ -461,8 +486,9 @@ $FontTitle  = New-Object System.Drawing.Font(""Segoe UI"", 13, [System.Drawing.F
 $FontSmall  = New-Object System.Drawing.Font(""Segoe UI"", 8.75)
 $FontButton = New-Object System.Drawing.Font(""Segoe UI"", 9.5, [System.Drawing.FontStyle]::Bold)
 
-# Regione con angoli arrotondati, usata per dare ai pulsanti e alla barra di
-# avanzamento un aspetto piu' morbido del rettangolo vivo di default di WinForms.
+# Regione con angoli arrotondati, usata per dare ai pulsanti, alle card e alla
+# barra di avanzamento un aspetto piu' morbido del rettangolo vivo di default
+# di WinForms.
 function New-RoundedRegion($w, $h, $r) {
     $d = $r * 2
     if ($d -gt $w) { $d = $w }
@@ -481,11 +507,19 @@ function Style-Form($form) {
     $form.Font = $FontBase
 }
 
-function Add-Separator($form, $x, $y, $w) {
-    $sep = New-Object System.Windows.Forms.Panel
-    $sep.SetBounds($x, $y, $w, 1)
-    $sep.BackColor = $ClrBorder
-    $form.Controls.Add($sep)
+# Pannello decorativo bianco con angoli arrotondati, usato come sfondo ""a
+# scheda"" dietro a un gruppo di controlli gia' posizionati sul form (i
+# controlli restano figli diretti del form, alle loro coordinate originali:
+# la card viene solo disegnata dietro di essi con SendToBack, senza bisogno
+# di ricalcolare le coordinate di nulla).
+function Add-Card($form, $x, $y, $w, $h) {
+    $card = New-Object System.Windows.Forms.Panel
+    $card.SetBounds($x, $y, $w, $h)
+    $card.BackColor = $ClrCardBg
+    $card.Region = New-RoundedRegion $card.Width $card.Height 12
+    $form.Controls.Add($card)
+    $card.SendToBack()
+    return $card
 }
 
 function Style-TitleLabel($lbl) {
@@ -547,6 +581,29 @@ function Style-SecondaryButton($btn) {
     $btn.Add_MouseLeave({ $this.BackColor = $ClrCardBg })
 }
 
+# Dissolvenza in apertura: il form parte invisibile (Opacity 0) e, non
+# appena viene mostrato, un timer lo porta a piena opacita' in pochi
+# passaggi. Puramente cosmetico: si ferma e si smonta da solo, non ha alcun
+# effetto sul contenuto o sul risultato del dialogo.
+function Enable-FadeIn($form) {
+    $form.Opacity = 0
+    $form.Add_Shown({
+        $fadeTimer = New-Object System.Windows.Forms.Timer
+        $fadeTimer.Interval = 15
+        $fadeTimer.Add_Tick({
+            $next = $form.Opacity + 0.15
+            if ($next -ge 1.0) {
+                $form.Opacity = 1.0
+                $fadeTimer.Stop()
+                $fadeTimer.Dispose()
+            } else {
+                $form.Opacity = $next
+            }
+        })
+        $fadeTimer.Start()
+    })
+}
+
 function Read-KeyValueFile($path) {
     $result = @{}
     if (Test-Path -LiteralPath $path) {
@@ -585,22 +642,23 @@ switch ($Stage) {
 
         $form = New-Object System.Windows.Forms.Form
         $form.Text = ""Conversione batch STEP -> STL""
-        $form.Width = 660
-        $form.Height = 490
+        $form.Width = 720
+        $form.Height = 580
         $form.StartPosition = ""CenterScreen""
         $form.FormBorderStyle = ""FixedDialog""
         $form.MinimizeBox = $false
         $form.MaximizeBox = $false
         $form.Topmost = $true
         Style-Form $form
+        Enable-FadeIn $form
 
         $lblTitle = New-Object System.Windows.Forms.Label
         $lblTitle.Text = ""Conversione batch STEP -> STL""
-        $lblTitle.SetBounds(24, 20, 580, 30)
+        $lblTitle.SetBounds(24, 20, 650, 30)
         Style-TitleLabel $lblTitle
         $form.Controls.Add($lblTitle)
 
-        Add-Separator $form 24 58 600
+        Add-Card $form 14 66 620 178 | Out-Null
 
         $lblIn = New-Object System.Windows.Forms.Label
         $lblIn.Text = ""Cartella di input (file STEP):""
@@ -656,24 +714,25 @@ switch ($Stage) {
 
         $chkAdvanced = New-Object System.Windows.Forms.CheckBox
         $chkAdvanced.Text = ""Mostra opzioni avanzate (tolleranze STL, superfici non chiuse)""
-        $chkAdvanced.SetBounds(24, 244, 460, 22)
+        $chkAdvanced.SetBounds(24, 254, 500, 24)
         Style-CheckBox $chkAdvanced
         $form.Controls.Add($chkAdvanced)
 
         $panelAdv = New-Object System.Windows.Forms.Panel
-        $panelAdv.SetBounds(24, 270, 600, 110)
+        $panelAdv.SetBounds(24, 284, 610, 140)
         $panelAdv.Visible = $false
-        $panelAdv.BackColor = $ClrWindowBg
+        $panelAdv.BackColor = $ClrCardBg
+        $panelAdv.Region = New-RoundedRegion $panelAdv.Width $panelAdv.Height 12
         $form.Controls.Add($panelAdv)
 
         $lblChordal = New-Object System.Windows.Forms.Label
         $lblChordal.Text = ""Tolleranza chordal:""
-        $lblChordal.SetBounds(0, 4, 160, 20)
+        $lblChordal.SetBounds(14, 14, 160, 20)
         Style-Label $lblChordal
         $panelAdv.Controls.Add($lblChordal)
 
         $numChordal = New-Object System.Windows.Forms.NumericUpDown
-        $numChordal.SetBounds(170, 2, 100, 24)
+        $numChordal.SetBounds(184, 12, 100, 24)
         $numChordal.DecimalPlaces = 4
         $numChordal.Increment = 0.0005
         $numChordal.Minimum = 0.0001
@@ -684,12 +743,12 @@ switch ($Stage) {
 
         $lblAdj = New-Object System.Windows.Forms.Label
         $lblAdj.Text = ""Tolleranza adjacency:""
-        $lblAdj.SetBounds(0, 36, 160, 20)
+        $lblAdj.SetBounds(14, 46, 160, 20)
         Style-Label $lblAdj
         $panelAdv.Controls.Add($lblAdj)
 
         $numAdj = New-Object System.Windows.Forms.NumericUpDown
-        $numAdj.SetBounds(170, 34, 100, 24)
+        $numAdj.SetBounds(184, 44, 100, 24)
         $numAdj.DecimalPlaces = 3
         $numAdj.Increment = 0.01
         $numAdj.Minimum = 0.001
@@ -700,12 +759,12 @@ switch ($Stage) {
 
         $lblAng = New-Object System.Windows.Forms.Label
         $lblAng.Text = ""Tolleranza angular:""
-        $lblAng.SetBounds(0, 68, 160, 20)
+        $lblAng.SetBounds(14, 78, 160, 20)
         Style-Label $lblAng
         $panelAdv.Controls.Add($lblAng)
 
         $numAng = New-Object System.Windows.Forms.NumericUpDown
-        $numAng.SetBounds(170, 66, 100, 24)
+        $numAng.SetBounds(184, 76, 100, 24)
         $numAng.DecimalPlaces = 1
         $numAng.Increment = 0.5
         $numAng.Minimum = 0.1
@@ -716,7 +775,7 @@ switch ($Stage) {
 
         $chkExportOpen = New-Object System.Windows.Forms.CheckBox
         $chkExportOpen.Text = ""Esporta anche i corpi non chiusi (superfici aperte)""
-        $chkExportOpen.SetBounds(0, 92, 460, 22)
+        $chkExportOpen.SetBounds(14, 108, 480, 22)
         $chkExportOpen.Checked = ($cfg[""ExportNotClosed""] -ne ""0"")
         Style-CheckBox $chkExportOpen
         $panelAdv.Controls.Add($chkExportOpen)
@@ -725,7 +784,7 @@ switch ($Stage) {
 
         $btnScan = New-Object System.Windows.Forms.Button
         $btnScan.Text = ""Avvia scansione""
-        $btnScan.SetBounds(24, 410, 190, 40)
+        $btnScan.SetBounds(24, 456, 210, 44)
         $btnScan.DialogResult = [System.Windows.Forms.DialogResult]::OK
         $form.Controls.Add($btnScan)
         Style-PrimaryButton $btnScan
@@ -733,7 +792,7 @@ switch ($Stage) {
 
         $btnCancel = New-Object System.Windows.Forms.Button
         $btnCancel.Text = ""Annulla""
-        $btnCancel.SetBounds(470, 410, 150, 40)
+        $btnCancel.SetBounds(466, 456, 210, 44)
         $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
         $form.Controls.Add($btnCancel)
         Style-SecondaryButton $btnCancel
@@ -773,6 +832,7 @@ switch ($Stage) {
         $form.MaximizeBox = $false
         $form.Topmost = $true
         Style-Form $form
+        Enable-FadeIn $form
 
         $lblTitle = New-Object System.Windows.Forms.Label
         $lblTitle.Text = ""Trovati conflitti - come procedere?""
@@ -780,7 +840,7 @@ switch ($Stage) {
         Style-TitleLabel $lblTitle
         $form.Controls.Add($lblTitle)
 
-        Add-Separator $form 24 58 600
+        Add-Card $form 14 64 620 350 | Out-Null
 
         $txtSummary = New-Object System.Windows.Forms.TextBox
         $txtSummary.Multiline = $true
@@ -836,6 +896,7 @@ switch ($Stage) {
         $form.MaximizeBox = $false
         $form.Topmost = $true
         Style-Form $form
+        Enable-FadeIn $form
 
         $lblTitle = New-Object System.Windows.Forms.Label
         $lblTitle.Text = ""Conversione STEP -> STL in corso""
@@ -843,17 +904,15 @@ switch ($Stage) {
         Style-TitleLabel $lblTitle
         $form.Controls.Add($lblTitle)
 
-        Add-Separator $form 24 58 500
-
         $lblFile = New-Object System.Windows.Forms.Label
         $lblFile.Text = ""Preparazione...""
-        $lblFile.SetBounds(24, 76, 500, 20)
+        $lblFile.SetBounds(24, 64, 500, 20)
         $lblFile.AutoEllipsis = $true
         Style-Label $lblFile
         $form.Controls.Add($lblFile)
 
         $pnlTrack = New-Object System.Windows.Forms.Panel
-        $pnlTrack.SetBounds(24, 108, 496, 14)
+        $pnlTrack.SetBounds(24, 96, 496, 14)
         $pnlTrack.BackColor = $ClrTrack
         $pnlTrack.Region = New-RoundedRegion $pnlTrack.Width $pnlTrack.Height 7
         $form.Controls.Add($pnlTrack)
@@ -866,19 +925,19 @@ switch ($Stage) {
 
         $lblCount = New-Object System.Windows.Forms.Label
         $lblCount.Text = (""0 di {0} completati"" -f $totalInitial)
-        $lblCount.SetBounds(24, 132, 300, 20)
+        $lblCount.SetBounds(24, 120, 300, 20)
         Style-SubLabel $lblCount
         $form.Controls.Add($lblCount)
 
         $lblStats = New-Object System.Windows.Forms.Label
         $lblStats.Text = """"
-        $lblStats.SetBounds(24, 154, 496, 20)
+        $lblStats.SetBounds(24, 142, 496, 20)
         Style-SubLabel $lblStats
         $form.Controls.Add($lblStats)
 
         $btnCancel = New-Object System.Windows.Forms.Button
         $btnCancel.Text = ""Annulla""
-        $btnCancel.SetBounds(370, 190, 150, 40)
+        $btnCancel.SetBounds(370, 178, 150, 40)
         $form.Controls.Add($btnCancel)
         Style-SecondaryButton $btnCancel
 
@@ -896,9 +955,19 @@ switch ($Stage) {
             }
         })
 
-        $timer = New-Object System.Windows.Forms.Timer
-        $timer.Interval = 350
-        $timer.Add_Tick({
+        # Due timer separati: uno ""lento"" (poll) legge il file di stato scritto
+        # dal batch e memorizza solo il target da raggiungere; uno ""veloce""
+        # (render) anima la barra avvicinandola gradualmente al target ad ogni
+        # tick, invece di farla scattare di colpo alla nuova percentuale. La
+        # chiusura della finestra avviene nel render timer, solo dopo che
+        # l'animazione ha raggiunto il target finale, cosi' l'utente vede
+        # sempre la barra arrivare visibilmente al 100% prima che si chiuda.
+        $script:targetWidth = 2
+        $script:doneReceived = $false
+
+        $pollTimer = New-Object System.Windows.Forms.Timer
+        $pollTimer.Interval = 300
+        $pollTimer.Add_Tick({
             $st = Read-KeyValueFile $statusFile
             if ($st.Count -eq 0) { return }
 
@@ -918,11 +987,10 @@ switch ($Stage) {
             if ($pct -lt 0) { $pct = 0 }
             if ($pct -gt 1) { $pct = 1 }
 
-            $fillWidth = [int]($pnlTrack.Width * $pct)
-            if ($fillWidth -lt 2) { $fillWidth = 2 }
-            if ($fillWidth -gt $pnlTrack.Width) { $fillWidth = $pnlTrack.Width }
-            $pnlFill.Width = $fillWidth
-            $pnlFill.Region = New-RoundedRegion $fillWidth $pnlFill.Height 7
+            $newTarget = [int]($pnlTrack.Width * $pct)
+            if ($newTarget -lt 2) { $newTarget = 2 }
+            if ($newTarget -gt $pnlTrack.Width) { $newTarget = $pnlTrack.Width }
+            $script:targetWidth = $newTarget
 
             if ([string]::IsNullOrEmpty($fileName)) {
                 $lblFile.Text = ""Elaborazione in corso...""
@@ -933,15 +1001,40 @@ switch ($Stage) {
             $lblStats.Text = (""Riusciti: {0}    Falliti: {1}"" -f $okCount, $failCount)
 
             if ($st[""Done""] -eq ""1"") {
-                $timer.Stop()
+                $script:doneReceived = $true
+            }
+        })
+
+        $renderTimer = New-Object System.Windows.Forms.Timer
+        $renderTimer.Interval = 30
+        $renderTimer.Add_Tick({
+            $currentWidth = $pnlFill.Width
+            $delta = $script:targetWidth - $currentWidth
+            if ([Math]::Abs($delta) -gt 0) {
+                $step = [int]($delta * 0.3)
+                if ($step -eq 0) { $step = if ($delta -gt 0) { 1 } else { -1 } }
+                $newWidth = $currentWidth + $step
+                if ($newWidth -lt 2) { $newWidth = 2 }
+                if ($newWidth -gt $pnlTrack.Width) { $newWidth = $pnlTrack.Width }
+                $pnlFill.Width = $newWidth
+                $pnlFill.Region = New-RoundedRegion $newWidth $pnlFill.Height 7
+            }
+
+            if ($script:doneReceived -and $pnlFill.Width -ge $script:targetWidth) {
+                $pollTimer.Stop()
+                $renderTimer.Stop()
                 $form.Close()
             }
         })
-        $timer.Start()
+
+        $pollTimer.Start()
+        $renderTimer.Start()
 
         [void]$form.ShowDialog()
-        $timer.Stop()
-        $timer.Dispose()
+        $pollTimer.Stop()
+        $pollTimer.Dispose()
+        $renderTimer.Stop()
+        $renderTimer.Dispose()
     }
     ""Summary"" {
         $inputFile = Join-Path $WorkDir ""summary_input.txt""
@@ -963,6 +1056,7 @@ switch ($Stage) {
         $form.MaximizeBox = $false
         $form.Topmost = $true
         Style-Form $form
+        Enable-FadeIn $form
 
         $lblTitle = New-Object System.Windows.Forms.Label
         $lblTitle.Text = ""Conversione completata""
@@ -970,7 +1064,7 @@ switch ($Stage) {
         Style-TitleLabel $lblTitle
         $form.Controls.Add($lblTitle)
 
-        Add-Separator $form 24 58 560
+        Add-Card $form 14 64 580 300 | Out-Null
 
         $txt = New-Object System.Windows.Forms.TextBox
         $txt.Multiline = $true
@@ -1557,6 +1651,15 @@ switch ($Stage) {
     // incrementale che avviene durante il batch dentro RunBatch.
     private static void WriteFinalLogSafety()
     {
+        if (logWriter != null)
+        {
+            try { logWriter.Flush(); }
+            catch (Exception) { /* la riscrittura completa qui sotto e' comunque la rete di sicurezza */ }
+            try { logWriter.Dispose(); }
+            catch (Exception) { /* handle gia' invalido: nulla da fare */ }
+            logWriter = null;
+        }
+
         try
         {
             string logDir = Directory.Exists(outputFolder) ? outputFolder : @"C:\Users\AndreaScalenghe\Desktop";
@@ -1599,13 +1702,19 @@ switch ($Stage) {
         logFilePath = Path.Combine(outputFolder, "log_conversione.txt");
         try
         {
-            File.WriteAllLines(logFilePath, logLines.ToArray());
+            logWriter = new StreamWriter(logFilePath, false, new UTF8Encoding(false));
+            foreach (string existingLine in logLines)
+            {
+                logWriter.WriteLine(existingLine);
+            }
+            logWriter.Flush();
         }
         catch (Exception)
         {
-            // se non riusciamo nemmeno ad azzerarlo, la scrittura incrementale
-            // fallira' silenziosamente riga per riga; resta comunque la
-            // scrittura finale di sicurezza in WriteFinalLogSafety().
+            // se non riusciamo nemmeno ad aprirlo, Log() ripiega da sola su
+            // File.AppendAllText riga per riga; resta comunque la scrittura
+            // finale di sicurezza in WriteFinalLogSafety().
+            logWriter = null;
         }
 
         if (decision == BatchDecision.CopyToNewFolder)
@@ -2828,7 +2937,15 @@ switch ($Stage) {
         {
             try
             {
-                File.AppendAllText(logFilePath, message + Environment.NewLine);
+                if (logWriter != null)
+                {
+                    logWriter.WriteLine(message);
+                    logWriter.Flush();
+                }
+                else
+                {
+                    File.AppendAllText(logFilePath, message + Environment.NewLine);
+                }
             }
             catch (Exception)
             {
