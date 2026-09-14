@@ -1,9 +1,32 @@
 // =============================================================================
-// NX Open Journal - Conversione massiva STEP -> STL (v10)
+// NX Open Journal - Conversione massiva STEP -> STL (v11)
 // Basato sul journal originale "journal.cs" (export singolo STL registrato in NX),
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
-// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v10):
+// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v11):
+// - CONFERMATO su questa installazione NX, anche a sessione appena riavviata e
+//   con la mitigazione TryPreloadCompatibleSystemDrawing gia' attiva: una
+//   Form vera NON PUO' aprirsi (stesso MissingMethodException su
+//   System.Drawing.Icon..ctor visto fin dal primo test). Il problema e'
+//   strutturale a questa installazione, non risolvibile da un journal .cs.
+//   Il percorso di fallback (MessageBox/FolderBrowserDialog) e' quindi
+//   diventato il percorso primario atteso, non piu' un ripiego di emergenza;
+//   di conseguenza gli sono state portate le funzionalita' che prima
+//   esistevano solo dentro LauncherForm:
+//   - Annullamento a meta' batch anche senza bottone "Annulla": creando un
+//     file di nome CANCEL.txt nella cartella di output durante l'esecuzione,
+//     il batch si ferma in modo pulito al file STEP successivo (il journal
+//     lo dice esplicitamente nel log all'avvio, e cancella da solo il file
+//     marker una volta rilevato).
+//   - Domanda opzionale (un solo MessageBox Si'/No) per decidere se
+//     esportare anche i corpi non chiusi in questa esecuzione, con la stessa
+//     logica "chiedi solo se serve" del resto del flusso (le tolleranze STL
+//     numeriche restano ai valori di default in questo percorso).
+//   Il contatore di avanzamento "[i/totale]" nel log era gia' presente dalla
+//   v8 in poi (Log() lo scrive ad ogni file), quindi era gia' visibile anche
+//   nel fallback: nessuna modifica necessaria per quello.
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v10:
 // - NUOVO: la finestra grafica (LauncherForm) ora gestisce l'INTERO flusso in
 //   un'unica finestra, senza mai chiudersi e riaprirsi: configurazione
 //   cartelle -> (se servono) risoluzione conflitti -> avanzamento della
@@ -998,7 +1021,7 @@ public class NXJournal
         ListingWindow lw = theSession.ListingWindow;
         lw.Open();
 
-        Log(lw, "=== Avvio conversione batch STEP -> STL (v10) ===");
+        Log(lw, "=== Avvio conversione batch STEP -> STL (v11) ===");
 
         TryPreloadCompatibleSystemDrawing();
 
@@ -1173,6 +1196,7 @@ public class NXJournal
             Log(lw, string.Format(
                 "Scansione: {0} file STEP, nessun conflitto rilevato. Procedo automaticamente, senza chiedere altro.",
                 summary.TotalSteps));
+            AskExportNotClosedToggle(lw);
             return BatchDecision.Overwrite;
         }
 
@@ -1189,7 +1213,24 @@ public class NXJournal
             return BatchDecision.Stop;
         }
 
-        return (modeResult == DialogResult.Yes) ? BatchDecision.Overwrite : BatchDecision.CopyToNewFolder;
+        BatchDecision chosenDecision = (modeResult == DialogResult.Yes) ? BatchDecision.Overwrite : BatchDecision.CopyToNewFolder;
+        AskExportNotClosedToggle(lw);
+        return chosenDecision;
+    }
+
+    // Unica opzione avanzata raggiungibile dal fallback: il solo toggle
+    // booleano per l'export dei corpi non chiusi. Le tolleranze numeriche
+    // restano ai valori di default in questo percorso (opzione di nicchia,
+    // per non introdurre componenti UI aggiuntivi non testati su questa
+    // installazione, come Microsoft.VisualBasic.InputBox).
+    private static void AskExportNotClosedToggle(ListingWindow lw)
+    {
+        DialogResult result = MessageBox.Show(
+            "Esportare anche i corpi non chiusi (mesh aperte) in una sottocartella dedicata?\n\n" +
+            "Si' = esporta (default)\nNo = salta i corpi non chiusi",
+            "Corpi non chiusi", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        exportNotClosedMeshes = (result == DialogResult.Yes);
+        Log(lw, "Export corpi non chiusi: " + (exportNotClosedMeshes ? "attivo" : "disattivato"));
     }
 
     // Selettore di cartella diretto: nessuna domanda preliminare "usare
@@ -1382,6 +1423,15 @@ public class NXJournal
 
         Log(lw, string.Format("Trovati {0} file STEP da convertire in: {1}", stepFiles.Count, inputFolder));
         Log(lw, string.Format("Output STL in: {0}", outputFolder));
+
+        // Meccanismo di annullamento cooperativo che funziona anche quando la
+        // Form vera non e' disponibile (fallback a soli MessageBox): oltre al
+        // flag CancelRequested (usato dal bottone "Annulla" della Form), si
+        // controlla anche l'esistenza di un file marker. Chi sta usando il
+        // fallback puo' annullare creando manualmente questo file (es. da
+        // Esplora risorse) durante l'esecuzione.
+        string cancelMarkerPath = Path.Combine(outputFolder, "CANCEL.txt");
+        Log(lw, "Per annullare durante l'esecuzione, crea un file di nome CANCEL.txt in: " + outputFolder);
         Log(lw, "");
 
         // Contatori file STEP (esportati come singolo STL con corpi diretti,
@@ -1409,11 +1459,13 @@ public class NXJournal
 
         for (int i = 0; i < stepFiles.Count; i++)
         {
-            if (CancelRequested)
+            if (CancelRequested || File.Exists(cancelMarkerPath))
             {
                 cancelled = true;
                 Log(lw, "");
                 Log(lw, string.Format("Annullato dall'utente: interrotto dopo {0} di {1} file STEP.", i, stepFiles.Count));
+                try { if (File.Exists(cancelMarkerPath)) File.Delete(cancelMarkerPath); }
+                catch (Exception) { /* marker gia' rimosso o non cancellabile: non blocca l'interruzione */ }
                 break;
             }
 
