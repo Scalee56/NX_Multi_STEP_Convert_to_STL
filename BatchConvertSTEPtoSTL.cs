@@ -510,15 +510,19 @@ function Style-Form($form) {
 # Pannello decorativo bianco con angoli arrotondati, usato come sfondo ""a
 # scheda"" dietro a un gruppo di controlli gia' posizionati sul form (i
 # controlli restano figli diretti del form, alle loro coordinate originali:
-# la card viene solo disegnata dietro di essi con SendToBack, senza bisogno
-# di ricalcolare le coordinate di nulla).
+# la card viene solo disegnata dietro di essi, senza bisogno di ricalcolare
+# le coordinate di nulla). IMPORTANTE: SendToBack() va richiamato dal
+# chiamante DOPO aver aggiunto tutti i controlli che devono comparire sopra
+# la card - chiamarlo qui, subito dopo la creazione (quando la card e'
+# ancora l'unico controllo nella collezione), non ha alcun effetto duraturo:
+# i controlli aggiunti in seguito finiscono comunque sopra di essa in modo
+# imprevedibile.
 function Add-Card($form, $x, $y, $w, $h) {
     $card = New-Object System.Windows.Forms.Panel
     $card.SetBounds($x, $y, $w, $h)
     $card.BackColor = $ClrCardBg
     $card.Region = New-RoundedRegion $card.Width $card.Height 12
     $form.Controls.Add($card)
-    $card.SendToBack()
     return $card
 }
 
@@ -658,7 +662,7 @@ switch ($Stage) {
         Style-TitleLabel $lblTitle
         $form.Controls.Add($lblTitle)
 
-        Add-Card $form 14 66 620 178 | Out-Null
+        $cardCartelle = Add-Card $form 14 66 620 178
 
         $lblIn = New-Object System.Windows.Forms.Label
         $lblIn.Text = ""Cartella di input (file STEP):""
@@ -711,6 +715,8 @@ switch ($Stage) {
         $lblInfo.SetBounds(24, 198, 600, 40)
         Style-SubLabel $lblInfo
         $form.Controls.Add($lblInfo)
+
+        $cardCartelle.SendToBack()
 
         $chkAdvanced = New-Object System.Windows.Forms.CheckBox
         $chkAdvanced.Text = ""Mostra opzioni avanzate (tolleranze STL, superfici non chiuse)""
@@ -840,7 +846,7 @@ switch ($Stage) {
         Style-TitleLabel $lblTitle
         $form.Controls.Add($lblTitle)
 
-        Add-Card $form 14 64 620 350 | Out-Null
+        $cardSummary = Add-Card $form 14 64 620 350
 
         $txtSummary = New-Object System.Windows.Forms.TextBox
         $txtSummary.Multiline = $true
@@ -850,6 +856,8 @@ switch ($Stage) {
         $txtSummary.Text = $summaryText
         Style-TextBox $txtSummary
         $form.Controls.Add($txtSummary)
+
+        $cardSummary.SendToBack()
 
         $btnOverwrite = New-Object System.Windows.Forms.Button
         $btnOverwrite.Text = ""Sovrascrivi""
@@ -1064,7 +1072,7 @@ switch ($Stage) {
         Style-TitleLabel $lblTitle
         $form.Controls.Add($lblTitle)
 
-        Add-Card $form 14 64 580 300 | Out-Null
+        $cardFinal = Add-Card $form 14 64 580 300
 
         $txt = New-Object System.Windows.Forms.TextBox
         $txt.Multiline = $true
@@ -1074,6 +1082,8 @@ switch ($Stage) {
         $txt.Text = $summaryText
         Style-TextBox $txt
         $form.Controls.Add($txt)
+
+        $cardFinal.SendToBack()
 
         $btnOpen = New-Object System.Windows.Forms.Button
         $btnOpen.Text = ""Apri cartella di output""
