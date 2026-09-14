@@ -1,9 +1,26 @@
 // =============================================================================
-// NX Open Journal - Conversione massiva STEP -> STL (v14)
+// NX Open Journal - Conversione massiva STEP -> STL (v14.2)
 // Basato sul journal originale "journal.cs" (export singolo STL registrato in NX),
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
-// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v14):
+// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v14.2):
+// - FIX: il primo campo di testo/il testo di riepilogo appariva sempre
+//   completamente selezionato (evidenziato in blu) all'apertura di ogni
+//   finestra - comportamento di default di WinForms quando un controllo
+//   riceve il focus iniziale. Ora il cursore in Config parte a inizio testo
+//   senza selezione, e le caselle di riepilogo (sola lettura) non possono
+//   piu' ricevere il focus.
+// - FIX: le etichette (e le caselle di spunta) avevano uno sfondo grigio
+//   opaco invece che trasparente - visibile come un rettangolo grigio
+//   sopra le card bianche. Ora tutte le etichette hanno sfondo trasparente.
+// - FIX: i pulsanti bianchi (Sfoglia, Annulla, ecc.) mostravano un bordino
+//   scuro e angoli poco arrotondati - causato dallo scaling automatico di
+//   WinForms in base al DPI dello schermo, applicato DOPO che le regioni
+//   arrotondate erano gia' state calcolate. Disattivato lo scaling
+//   automatico e sostituito bianco+bordo con un riempimento grigio chiaro
+//   pieno, piu' robusto verso questo tipo di disallineamento.
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v14:
 // - ULTERIORE RIFINITURA GRAFICA della GUI esterna: gruppi di campi racchiusi
 //   in "card" bianche con angoli arrotondati su sfondo grigio chiaro (stile
 //   pannelli di Impostazioni di macOS), dissolvenza in apertura per tutte le
@@ -390,7 +407,7 @@ public class NXJournal
         ListingWindow lw = theSession.ListingWindow;
         lw.Open();
 
-        Log(lw, "=== Avvio conversione batch STEP -> STL (v14) ===");
+        Log(lw, "=== Avvio conversione batch STEP -> STL (v14.2) ===");
 
         // Percorso preferito: GUI vera mostrata da un processo powershell.exe
         // separato (vedi RunExternalGuiFlow) - configurazione cartelle,
@@ -503,6 +520,14 @@ function New-RoundedRegion($w, $h, $r) {
 }
 
 function Style-Form($form) {
+    # AutoScaleMode di default (Font) fa si' che WinForms ridimensioni tutti
+    # i controlli DOPO che erano gia' stati posizionati/arrotondati con le
+    # coordinate assolute usate qui, su schermi con scaling DPI diverso dal
+    # 100%: il risultato e' un disallineamento fra i bordi dei pulsanti e la
+    # loro regione arrotondata (angoli poco arrotondati, bordino residuo).
+    # Disattivandolo i controlli restano esattamente alle coordinate/misure
+    # con cui sono stati creati.
+    $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
     $form.BackColor = $ClrWindowBg
     $form.Font = $FontBase
 }
@@ -529,16 +554,19 @@ function Add-Card($form, $x, $y, $w, $h) {
 function Style-TitleLabel($lbl) {
     $lbl.Font = $FontTitle
     $lbl.ForeColor = $ClrText
+    $lbl.BackColor = [System.Drawing.Color]::Transparent
 }
 
 function Style-Label($lbl) {
     $lbl.Font = $FontBase
     $lbl.ForeColor = $ClrText
+    $lbl.BackColor = [System.Drawing.Color]::Transparent
 }
 
 function Style-SubLabel($lbl) {
     $lbl.Font = $FontSmall
     $lbl.ForeColor = $ClrSubtext
+    $lbl.BackColor = [System.Drawing.Color]::Transparent
 }
 
 function Style-TextBox($txt) {
@@ -558,6 +586,7 @@ function Style-NumericUpDown($num) {
 function Style-CheckBox($chk) {
     $chk.Font = $FontBase
     $chk.ForeColor = $ClrText
+    $chk.BackColor = [System.Drawing.Color]::Transparent
 }
 
 function Style-PrimaryButton($btn) {
@@ -573,16 +602,20 @@ function Style-PrimaryButton($btn) {
 }
 
 function Style-SecondaryButton($btn) {
+    # Niente FlatAppearance.BorderSize: un bordo rettangolare disegnato sopra
+    # una regione arrotondata lascia un piccolo residuo agli angoli (il
+    # ""bordino"" visibile). Un riempimento pieno grigio chiaro invece del
+    # bianco+bordo evita del tutto il problema e resta leggibile come
+    # pulsante anche sopra le card bianche.
     $btn.FlatStyle = ""Flat""
-    $btn.FlatAppearance.BorderSize = 1
-    $btn.FlatAppearance.BorderColor = $ClrBorder
-    $btn.BackColor = $ClrCardBg
+    $btn.FlatAppearance.BorderSize = 0
+    $btn.BackColor = $ClrTrack
     $btn.ForeColor = $ClrText
     $btn.Font = $FontButton
     $btn.Cursor = [System.Windows.Forms.Cursors]::Hand
     $btn.Region = New-RoundedRegion $btn.Width $btn.Height 8
-    $btn.Add_MouseEnter({ $this.BackColor = $ClrTrack })
-    $btn.Add_MouseLeave({ $this.BackColor = $ClrCardBg })
+    $btn.Add_MouseEnter({ $this.BackColor = $ClrBorder })
+    $btn.Add_MouseLeave({ $this.BackColor = $ClrTrack })
 }
 
 # Dissolvenza in apertura: il form parte invisibile (Opacity 0) e, non
@@ -804,6 +837,12 @@ switch ($Stage) {
         Style-SecondaryButton $btnCancel
         $form.CancelButton = $btnCancel
 
+        # Senza questo, il primo campo di testo riceve il focus all'apertura
+        # e Windows ne seleziona automaticamente tutto il contenuto (il
+        # testo appare ""sempre evidenziato in blu""). Sposto solo il cursore
+        # a inizio testo, senza selezionare nulla.
+        $form.Add_Shown({ $txtIn.Select(0, 0) })
+
         $result = $form.ShowDialog()
 
         $out = @{}
@@ -851,6 +890,7 @@ switch ($Stage) {
         $txtSummary = New-Object System.Windows.Forms.TextBox
         $txtSummary.Multiline = $true
         $txtSummary.ReadOnly = $true
+        $txtSummary.TabStop = $false
         $txtSummary.ScrollBars = ""Vertical""
         $txtSummary.SetBounds(24, 74, 600, 330)
         $txtSummary.Text = $summaryText
@@ -1077,6 +1117,7 @@ switch ($Stage) {
         $txt = New-Object System.Windows.Forms.TextBox
         $txt.Multiline = $true
         $txt.ReadOnly = $true
+        $txt.TabStop = $false
         $txt.ScrollBars = ""Vertical""
         $txt.SetBounds(24, 74, 560, 280)
         $txt.Text = $summaryText
