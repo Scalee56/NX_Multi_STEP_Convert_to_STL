@@ -1,9 +1,36 @@
 // =============================================================================
-// NX Open Journal - Conversione massiva STEP -> STL (v14.2)
+// NX Open Journal - Conversione massiva STEP -> STL (v15)
 // Basato sul journal originale "journal.cs" (export singolo STL registrato in NX),
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
-// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v14.2):
+// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v15):
+// - FIX CRITICO: l'apertura di un file STEP (o di un .prt di componente gia'
+//   noto) con OpenActiveDisplay(..., DisplayPartOption.AllowAdditional, ...)
+//   non garantisce che la parte aperta diventi anche la "Work part" (puo'
+//   restare solo "Display part", tipicamente per il primo file aperto nella
+//   sessione) - ma ApplicationSwitchImmediate("UG_APP_MODELING") richiede
+//   una Work part valida, quindi falliva SEMPRE con "Cannot enter the
+//   specified application since a part is required", portando a 0
+//   conversioni riuscite. Ora la Work part viene impostata esplicitamente
+//   (Parts.SetWork) se OpenActiveDisplay non l'ha gia' fatto, con un errore
+//   chiaro invece di quello generico se anche questo non basta.
+// - AGGIUNTA anteprima del pezzo in elaborazione (JPG esportato direttamente
+//   da NX via ImageExportBuilder, nessuna dipendenza da System.Drawing.Common
+//   lato NX), tempo trascorso e rotella di caricamento animata nel pannello
+//   di avanzamento - la preview restava sempre vuota quando la conversione
+//   falliva per il motivo sopra (CaptureAndDisplayScreenshot richiede
+//   Parts.Display non null, mai il caso quando l'apertura falliva).
+// - RIFATTA l'architettura della GUI esterna (PowerShell): prima ogni fase
+//   (Config / Decisione / Avanzamento / Riepilogo) apriva un processo
+//   powershell.exe/finestra separati, dando l'impressione che le finestre si
+//   chiudessero e riaprissero continuamente. Ora c'e' UN SOLO processo,
+//   avviato una volta sola, la cui finestra resta aperta per tutto il run e
+//   cambia semplicemente pannello al proprio interno; mentre il journal C#
+//   calcola la fase successiva (scansione conflitti, avvio conversione,
+//   riepilogo finale) la stessa finestra mostra un pannello di attesa con
+//   una rotella di caricamento, invece di sparire e ricomparire.
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v14.2:
 // - FIX: il primo campo di testo/il testo di riepilogo appariva sempre
 //   completamente selezionato (evidenziato in blu) all'apertura di ogni
 //   finestra - comportamento di default di WinForms quando un controllo
@@ -367,6 +394,14 @@ public class NXJournal
     // scritto, e per poter ripulire tutto a fine esecuzione
     // (CleanUpExternalGuiWorkDir). Null se la GUI esterna non e' mai partita.
     private static string externalGuiWorkDir = null;
+
+    // Processo powershell.exe UNICO che ospita la GUI esterna per l'intera
+    // durata del run (config -> eventuale decisione -> avanzamento ->
+    // riepilogo): a differenza delle versioni precedenti (un processo per
+    // stage), qui la finestra resta la stessa per tutto il flusso e cambia
+    // solo pannello internamente, cosi' non si vede mai chiudere/riaprire.
+    // Null se la GUI esterna non e' mai partita.
+    private static Process externalGuiProcess = null;
     private static string externalGuiScriptPath = null;
 
     // Risultato di un'esecuzione di RunBatch: i conteggi erano gia' tutti
@@ -407,7 +442,7 @@ public class NXJournal
         ListingWindow lw = theSession.ListingWindow;
         lw.Open();
 
-        Log(lw, "=== Avvio conversione batch STEP -> STL (v14.2) ===");
+        Log(lw, "=== Avvio conversione batch STEP -> STL (v15) ===");
 
         // Percorso preferito: GUI vera mostrata da un processo powershell.exe
         // separato (vedi RunExternalGuiFlow) - configurazione cartelle,
@@ -441,6 +476,7 @@ public class NXJournal
         if (decision == BatchDecision.Stop)
         {
             LogStopAndExit(lw, "Interrotto dall'utente prima di avviare la conversione. Nessun file scritto.");
+            CleanUpExternalGuiWorkDir();
             return;
         }
 
@@ -463,23 +499,37 @@ public class NXJournal
         {
             TryShowExternalGuiSummary(lw, result);
         }
+        else if (externalGuiSucceeded)
+        {
+            // RunBatch e' uscito con un errore generale (result e' rimasto
+            // null): nessun riepilogo da mostrare, ma la finestra persistente
+            // e' comunque ancora aperta (probabilmente ferma sul pannello di
+            // attesa) e nessuno le dira' piu' cosa fare dopo - va chiusa
+            // esplicitamente, altrimenti resterebbe li' per sempre.
+            TryCloseExternalGuiProcess();
+        }
 
         CleanUpExternalGuiWorkDir();
     }
 
-    // Script PowerShell della GUI esterna: un unico file con quattro "stage"
-    // (Config / Decision / Progress / Summary, scelti con il parametro -Stage),
-    // scritto su disco una volta per run e rilanciato in processi powershell.exe
-    // separati (vedi RunPowerShellStage e StartPowerShellProgressWindow). Ogni
-    // stage legge il proprio file di input e scrive il proprio file di output
-    // dentro -WorkDir, in un formato "chiave=valore" volutamente elementare
-    // (niente libreria JSON necessaria su nessuno dei due lati). Tutti i numeri
-    // sono sempre formattati/parsati con cultura invariante (punto come separatore
-    // decimale), per non dipendere dalle impostazioni regionali della
-    // macchina (es. virgola invece di punto con Windows in italiano).
+    // Script PowerShell della GUI esterna: un unico file, scritto su disco
+    // una volta per run e lanciato UNA SOLA volta come processo persistente
+    // (vedi StartPersistentExternalGui), che resta aperto per l'intera
+    // durata del flusso (Config / eventuale Decision / Progress / Summary) e
+    // cambia semplicemente pannello al suo interno - mai un nuovo processo o
+    // una nuova finestra per fase (vedi il commento "Finestra unica
+    // persistente" dentro lo script). Ogni fase legge il proprio file di
+    // input e scrive il proprio file di output dentro -WorkDir, in un
+    // formato "chiave=valore" volutamente elementare (niente libreria JSON
+    // necessaria su nessuno dei due lati); il file "next_stage.txt" e' il
+    // segnale con cui il lato C# dice alla finestra (ferma sul pannello di
+    // attesa) quale pannello mostrare quando ha finito di calcolare la fase
+    // successiva. Tutti i numeri sono sempre formattati/parsati con cultura
+    // invariante (punto come separatore decimale), per non dipendere dalle
+    // impostazioni regionali della macchina (es. virgola invece di punto con
+    // Windows in italiano).
     private static readonly string ExternalGuiScriptSource =
 @"param(
-    [Parameter(Mandatory=$true)][string]$Stage,
     [Parameter(Mandatory=$true)][string]$WorkDir
 )
 
@@ -671,495 +721,709 @@ function Parse-Double($text, $default) {
     return $default
 }
 
-switch ($Stage) {
-    ""Config"" {
-        $inputFile = Join-Path $WorkDir ""config_input.txt""
-        $outputFile = Join-Path $WorkDir ""config_output.txt""
-        $cfg = Read-KeyValueFile $inputFile
+# --- Finestra unica persistente -------------------------------------------
+# A differenza delle versioni precedenti (un processo powershell.exe per
+# stage, ognuno con il proprio Form/ShowDialog), qui viene creato UN SOLO
+# Form, mostrato UNA SOLA volta con ShowDialog() alla fine dello script: ogni
+# ""stage"" (Config / Attesa / Decisione / Avanzamento / Riepilogo) e' un
+# Panel separato, gia' costruito in anticipo, che viene semplicemente reso
+# visibile (nascondendo gli altri) al momento giusto. Cosi' la finestra non
+# si chiude e riapre mai fra una fase e l'altra: quando il journal C# (dentro
+# NX) deve calcolare qualcosa (la scansione conflitti, l'avvio della
+# conversione, il riepilogo finale) la stessa finestra mostra semplicemente
+# il pannello ""Attesa"" con una rotella di caricamento, finche' il file di
+# comando ""next_stage.txt"" non le dice quale pannello mostrare dopo.
+function Center-Form($targetForm, $w, $h) {
+    $targetForm.Width = $w
+    $targetForm.Height = $h
+    $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $x = $wa.X + [int](($wa.Width - $targetForm.Width) / 2)
+    $y = $wa.Y + [int](($wa.Height - $targetForm.Height) / 2)
+    $targetForm.Location = New-Object System.Drawing.Point($x, $y)
+}
 
-        $form = New-Object System.Windows.Forms.Form
-        $form.Text = ""Conversione batch STEP -> STL""
-        $form.Width = 720
-        $form.Height = 580
-        $form.StartPosition = ""CenterScreen""
-        $form.FormBorderStyle = ""FixedDialog""
-        $form.MinimizeBox = $false
-        $form.MaximizeBox = $false
-        $form.Topmost = $true
-        Style-Form $form
-        Enable-FadeIn $form
+$form = New-Object System.Windows.Forms.Form
+$form.StartPosition = ""Manual""
+$form.FormBorderStyle = ""FixedDialog""
+$form.MinimizeBox = $false
+$form.MaximizeBox = $false
+$form.Topmost = $true
+Style-Form $form
 
-        $lblTitle = New-Object System.Windows.Forms.Label
-        $lblTitle.Text = ""Conversione batch STEP -> STL""
-        $lblTitle.SetBounds(24, 20, 650, 30)
-        Style-TitleLabel $lblTitle
-        $form.Controls.Add($lblTitle)
+$configInputFile = Join-Path $WorkDir ""config_input.txt""
+$cfg = Read-KeyValueFile $configInputFile
 
-        $cardCartelle = Add-Card $form 14 66 620 178
+# --- Pannello Config --------------------------------------------------------
+$pnlConfig = New-Object System.Windows.Forms.Panel
+$pnlConfig.SetBounds(0, 0, 720, 580)
+$pnlConfig.BackColor = $ClrWindowBg
+$form.Controls.Add($pnlConfig)
 
-        $lblIn = New-Object System.Windows.Forms.Label
-        $lblIn.Text = ""Cartella di input (file STEP):""
-        $lblIn.SetBounds(24, 74, 580, 20)
-        Style-Label $lblIn
-        $form.Controls.Add($lblIn)
+$lblTitleConfig = New-Object System.Windows.Forms.Label
+$lblTitleConfig.Text = ""Conversione batch STEP -> STL""
+$lblTitleConfig.SetBounds(24, 20, 650, 30)
+Style-TitleLabel $lblTitleConfig
+$pnlConfig.Controls.Add($lblTitleConfig)
 
-        $txtIn = New-Object System.Windows.Forms.TextBox
-        $txtIn.SetBounds(24, 98, 500, 26)
-        $txtIn.Text = $cfg[""InputFolder""]
-        Style-TextBox $txtIn
-        $form.Controls.Add($txtIn)
+$cardCartelle = Add-Card $pnlConfig 14 66 620 178
 
-        $btnBrowseIn = New-Object System.Windows.Forms.Button
-        $btnBrowseIn.Text = ""Sfoglia""
-        $btnBrowseIn.SetBounds(536, 96, 88, 30)
-        $form.Controls.Add($btnBrowseIn)
-        Style-SecondaryButton $btnBrowseIn
-        $btnBrowseIn.Add_Click({
-            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-            if (Test-Path -LiteralPath $txtIn.Text) { $dlg.SelectedPath = $txtIn.Text }
-            if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtIn.Text = $dlg.SelectedPath }
-        })
+$lblIn = New-Object System.Windows.Forms.Label
+$lblIn.Text = ""Cartella di input (file STEP):""
+$lblIn.SetBounds(24, 74, 580, 20)
+Style-Label $lblIn
+$pnlConfig.Controls.Add($lblIn)
 
-        $lblOut = New-Object System.Windows.Forms.Label
-        $lblOut.Text = ""Cartella di output (file STL):""
-        $lblOut.SetBounds(24, 138, 580, 20)
-        Style-Label $lblOut
-        $form.Controls.Add($lblOut)
+$txtIn = New-Object System.Windows.Forms.TextBox
+$txtIn.SetBounds(24, 98, 500, 26)
+$txtIn.Text = $cfg[""InputFolder""]
+Style-TextBox $txtIn
+$pnlConfig.Controls.Add($txtIn)
 
-        $txtOut = New-Object System.Windows.Forms.TextBox
-        $txtOut.SetBounds(24, 162, 500, 26)
-        $txtOut.Text = $cfg[""OutputFolder""]
-        Style-TextBox $txtOut
-        $form.Controls.Add($txtOut)
+$btnBrowseIn = New-Object System.Windows.Forms.Button
+$btnBrowseIn.Text = ""Sfoglia""
+$btnBrowseIn.SetBounds(536, 96, 88, 30)
+$pnlConfig.Controls.Add($btnBrowseIn)
+Style-SecondaryButton $btnBrowseIn
+$btnBrowseIn.Add_Click({
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    if (Test-Path -LiteralPath $txtIn.Text) { $dlg.SelectedPath = $txtIn.Text }
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtIn.Text = $dlg.SelectedPath }
+})
 
-        $btnBrowseOut = New-Object System.Windows.Forms.Button
-        $btnBrowseOut.Text = ""Sfoglia""
-        $btnBrowseOut.SetBounds(536, 160, 88, 30)
-        $form.Controls.Add($btnBrowseOut)
-        Style-SecondaryButton $btnBrowseOut
-        $btnBrowseOut.Add_Click({
-            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-            if (Test-Path -LiteralPath $txtOut.Text) { $dlg.SelectedPath = $txtOut.Text }
-            if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtOut.Text = $dlg.SelectedPath }
-        })
+$lblOut = New-Object System.Windows.Forms.Label
+$lblOut.Text = ""Cartella di output (file STL):""
+$lblOut.SetBounds(24, 138, 580, 20)
+Style-Label $lblOut
+$pnlConfig.Controls.Add($lblOut)
 
-        $lblInfo = New-Object System.Windows.Forms.Label
-        $lblInfo.Text = ""La scansione confronta i file STEP di input con gli STL gia' presenti in output, senza aprire NX. Se non trova conflitti la conversione parte subito.""
-        $lblInfo.SetBounds(24, 198, 600, 40)
-        Style-SubLabel $lblInfo
-        $form.Controls.Add($lblInfo)
+$txtOut = New-Object System.Windows.Forms.TextBox
+$txtOut.SetBounds(24, 162, 500, 26)
+$txtOut.Text = $cfg[""OutputFolder""]
+Style-TextBox $txtOut
+$pnlConfig.Controls.Add($txtOut)
 
-        $cardCartelle.SendToBack()
+$btnBrowseOut = New-Object System.Windows.Forms.Button
+$btnBrowseOut.Text = ""Sfoglia""
+$btnBrowseOut.SetBounds(536, 160, 88, 30)
+$pnlConfig.Controls.Add($btnBrowseOut)
+Style-SecondaryButton $btnBrowseOut
+$btnBrowseOut.Add_Click({
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    if (Test-Path -LiteralPath $txtOut.Text) { $dlg.SelectedPath = $txtOut.Text }
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtOut.Text = $dlg.SelectedPath }
+})
 
-        $chkAdvanced = New-Object System.Windows.Forms.CheckBox
-        $chkAdvanced.Text = ""Mostra opzioni avanzate (tolleranze STL, superfici non chiuse)""
-        $chkAdvanced.SetBounds(24, 254, 500, 24)
-        Style-CheckBox $chkAdvanced
-        $form.Controls.Add($chkAdvanced)
+$lblInfo = New-Object System.Windows.Forms.Label
+$lblInfo.Text = ""La scansione confronta i file STEP di input con gli STL gia' presenti in output, senza aprire NX. Se non trova conflitti la conversione parte subito.""
+$lblInfo.SetBounds(24, 198, 600, 40)
+Style-SubLabel $lblInfo
+$pnlConfig.Controls.Add($lblInfo)
 
-        $panelAdv = New-Object System.Windows.Forms.Panel
-        $panelAdv.SetBounds(24, 284, 610, 140)
-        $panelAdv.Visible = $false
-        $panelAdv.BackColor = $ClrCardBg
-        $panelAdv.Region = New-RoundedRegion $panelAdv.Width $panelAdv.Height 12
-        $form.Controls.Add($panelAdv)
+$cardCartelle.SendToBack()
 
-        $lblChordal = New-Object System.Windows.Forms.Label
-        $lblChordal.Text = ""Tolleranza chordal:""
-        $lblChordal.SetBounds(14, 14, 160, 20)
-        Style-Label $lblChordal
-        $panelAdv.Controls.Add($lblChordal)
+$chkAdvanced = New-Object System.Windows.Forms.CheckBox
+$chkAdvanced.Text = ""Mostra opzioni avanzate (tolleranze STL, superfici non chiuse)""
+$chkAdvanced.SetBounds(24, 254, 500, 24)
+Style-CheckBox $chkAdvanced
+$pnlConfig.Controls.Add($chkAdvanced)
 
-        $numChordal = New-Object System.Windows.Forms.NumericUpDown
-        $numChordal.SetBounds(184, 12, 100, 24)
-        $numChordal.DecimalPlaces = 4
-        $numChordal.Increment = 0.0005
-        $numChordal.Minimum = 0.0001
-        $numChordal.Maximum = 10
-        $numChordal.Value = [decimal](Parse-Double $cfg[""ChordalTol""] 0.0025)
-        Style-NumericUpDown $numChordal
-        $panelAdv.Controls.Add($numChordal)
+$panelAdv = New-Object System.Windows.Forms.Panel
+$panelAdv.SetBounds(24, 284, 610, 140)
+$panelAdv.Visible = $false
+$panelAdv.BackColor = $ClrCardBg
+$panelAdv.Region = New-RoundedRegion $panelAdv.Width $panelAdv.Height 12
+$pnlConfig.Controls.Add($panelAdv)
 
-        $lblAdj = New-Object System.Windows.Forms.Label
-        $lblAdj.Text = ""Tolleranza adjacency:""
-        $lblAdj.SetBounds(14, 46, 160, 20)
-        Style-Label $lblAdj
-        $panelAdv.Controls.Add($lblAdj)
+$lblChordal = New-Object System.Windows.Forms.Label
+$lblChordal.Text = ""Tolleranza chordal:""
+$lblChordal.SetBounds(14, 14, 160, 20)
+Style-Label $lblChordal
+$panelAdv.Controls.Add($lblChordal)
 
-        $numAdj = New-Object System.Windows.Forms.NumericUpDown
-        $numAdj.SetBounds(184, 44, 100, 24)
-        $numAdj.DecimalPlaces = 3
-        $numAdj.Increment = 0.01
-        $numAdj.Minimum = 0.001
-        $numAdj.Maximum = 100
-        $numAdj.Value = [decimal](Parse-Double $cfg[""AdjacencyTol""] 0.08)
-        Style-NumericUpDown $numAdj
-        $panelAdv.Controls.Add($numAdj)
+$numChordal = New-Object System.Windows.Forms.NumericUpDown
+$numChordal.SetBounds(184, 12, 100, 24)
+$numChordal.DecimalPlaces = 4
+$numChordal.Increment = 0.0005
+$numChordal.Minimum = 0.0001
+$numChordal.Maximum = 10
+$numChordal.Value = [decimal](Parse-Double $cfg[""ChordalTol""] 0.0025)
+Style-NumericUpDown $numChordal
+$panelAdv.Controls.Add($numChordal)
 
-        $lblAng = New-Object System.Windows.Forms.Label
-        $lblAng.Text = ""Tolleranza angular:""
-        $lblAng.SetBounds(14, 78, 160, 20)
-        Style-Label $lblAng
-        $panelAdv.Controls.Add($lblAng)
+$lblAdj = New-Object System.Windows.Forms.Label
+$lblAdj.Text = ""Tolleranza adjacency:""
+$lblAdj.SetBounds(14, 46, 160, 20)
+Style-Label $lblAdj
+$panelAdv.Controls.Add($lblAdj)
 
-        $numAng = New-Object System.Windows.Forms.NumericUpDown
-        $numAng.SetBounds(184, 76, 100, 24)
-        $numAng.DecimalPlaces = 1
-        $numAng.Increment = 0.5
-        $numAng.Minimum = 0.1
-        $numAng.Maximum = 90
-        $numAng.Value = [decimal](Parse-Double $cfg[""AngularTol""] 5.0)
-        Style-NumericUpDown $numAng
-        $panelAdv.Controls.Add($numAng)
+$numAdj = New-Object System.Windows.Forms.NumericUpDown
+$numAdj.SetBounds(184, 44, 100, 24)
+$numAdj.DecimalPlaces = 3
+$numAdj.Increment = 0.01
+$numAdj.Minimum = 0.001
+$numAdj.Maximum = 100
+$numAdj.Value = [decimal](Parse-Double $cfg[""AdjacencyTol""] 0.08)
+Style-NumericUpDown $numAdj
+$panelAdv.Controls.Add($numAdj)
 
-        $chkExportOpen = New-Object System.Windows.Forms.CheckBox
-        $chkExportOpen.Text = ""Esporta anche i corpi non chiusi (superfici aperte)""
-        $chkExportOpen.SetBounds(14, 108, 480, 22)
-        $chkExportOpen.Checked = ($cfg[""ExportNotClosed""] -ne ""0"")
-        Style-CheckBox $chkExportOpen
-        $panelAdv.Controls.Add($chkExportOpen)
+$lblAng = New-Object System.Windows.Forms.Label
+$lblAng.Text = ""Tolleranza angular:""
+$lblAng.SetBounds(14, 78, 160, 20)
+Style-Label $lblAng
+$panelAdv.Controls.Add($lblAng)
 
-        $chkAdvanced.Add_CheckedChanged({ $panelAdv.Visible = $chkAdvanced.Checked })
+$numAng = New-Object System.Windows.Forms.NumericUpDown
+$numAng.SetBounds(184, 76, 100, 24)
+$numAng.DecimalPlaces = 1
+$numAng.Increment = 0.5
+$numAng.Minimum = 0.1
+$numAng.Maximum = 90
+$numAng.Value = [decimal](Parse-Double $cfg[""AngularTol""] 5.0)
+Style-NumericUpDown $numAng
+$panelAdv.Controls.Add($numAng)
 
-        $btnScan = New-Object System.Windows.Forms.Button
-        $btnScan.Text = ""Avvia scansione""
-        $btnScan.SetBounds(24, 456, 210, 44)
-        $btnScan.DialogResult = [System.Windows.Forms.DialogResult]::OK
-        $form.Controls.Add($btnScan)
-        Style-PrimaryButton $btnScan
-        $form.AcceptButton = $btnScan
+$chkExportOpen = New-Object System.Windows.Forms.CheckBox
+$chkExportOpen.Text = ""Esporta anche i corpi non chiusi (superfici aperte)""
+$chkExportOpen.SetBounds(14, 108, 480, 22)
+$chkExportOpen.Checked = ($cfg[""ExportNotClosed""] -ne ""0"")
+Style-CheckBox $chkExportOpen
+$panelAdv.Controls.Add($chkExportOpen)
 
-        $btnCancel = New-Object System.Windows.Forms.Button
-        $btnCancel.Text = ""Annulla""
-        $btnCancel.SetBounds(466, 456, 210, 44)
-        $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
-        $form.Controls.Add($btnCancel)
-        Style-SecondaryButton $btnCancel
-        $form.CancelButton = $btnCancel
+$chkAdvanced.Add_CheckedChanged({ $panelAdv.Visible = $chkAdvanced.Checked })
 
-        # Senza questo, il primo campo di testo riceve il focus all'apertura
-        # e Windows ne seleziona automaticamente tutto il contenuto (il
-        # testo appare ""sempre evidenziato in blu""). Sposto solo il cursore
-        # a inizio testo, senza selezionare nulla.
-        $form.Add_Shown({ $txtIn.Select(0, 0) })
+$btnScanConfig = New-Object System.Windows.Forms.Button
+$btnScanConfig.Text = ""Avvia scansione""
+$btnScanConfig.SetBounds(24, 456, 210, 44)
+$pnlConfig.Controls.Add($btnScanConfig)
+Style-PrimaryButton $btnScanConfig
 
-        $result = $form.ShowDialog()
+$btnCancelConfig = New-Object System.Windows.Forms.Button
+$btnCancelConfig.Text = ""Annulla""
+$btnCancelConfig.SetBounds(466, 456, 210, 44)
+$pnlConfig.Controls.Add($btnCancelConfig)
+Style-SecondaryButton $btnCancelConfig
 
-        $out = @{}
-        if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
-            $out[""Cancelled""] = ""0""
-            $out[""InputFolder""] = $txtIn.Text
-            $out[""OutputFolder""] = $txtOut.Text
-            $out[""ChordalTol""] = $numChordal.Value.ToString($ic)
-            $out[""AdjacencyTol""] = $numAdj.Value.ToString($ic)
-            $out[""AngularTol""] = $numAng.Value.ToString($ic)
-            $out[""ExportNotClosed""] = if ($chkExportOpen.Checked) { ""1"" } else { ""0"" }
-        } else {
-            $out[""Cancelled""] = ""1""
+# --- Pannello Attesa (spinner mostrato mentre NX/il journal calcola la fase
+# successiva: scansione conflitti, avvio conversione, riepilogo finale) ------
+$pnlWaiting = New-Object System.Windows.Forms.Panel
+$pnlWaiting.SetBounds(0, 0, 420, 220)
+$pnlWaiting.BackColor = $ClrWindowBg
+$form.Controls.Add($pnlWaiting)
+
+$lblWaitTitle = New-Object System.Windows.Forms.Label
+$lblWaitTitle.Text = ""Elaborazione in corso...""
+$lblWaitTitle.SetBounds(24, 26, 372, 30)
+Style-TitleLabel $lblWaitTitle
+$pnlWaiting.Controls.Add($lblWaitTitle)
+
+$lblWaitSub = New-Object System.Windows.Forms.Label
+$lblWaitSub.Text = """"
+$lblWaitSub.SetBounds(24, 62, 372, 40)
+Style-SubLabel $lblWaitSub
+$pnlWaiting.Controls.Add($lblWaitSub)
+
+$pnlWaitSpinner = New-Object System.Windows.Forms.Panel
+$pnlWaitSpinner.SetBounds(190, 120, 40, 40)
+$pnlWaitSpinner.BackColor = $ClrWindowBg
+$pnlWaiting.Controls.Add($pnlWaitSpinner)
+
+$script:waitSpinnerAngle = 0
+$pnlWaitSpinner.Add_Paint({
+    param($spSender, $spEvent)
+    $spEvent.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $spPen = New-Object System.Drawing.Pen($ClrAccent, 4)
+    $spPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $spPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $spRect = New-Object System.Drawing.Rectangle(4, 4, ($spSender.Width - 8), ($spSender.Height - 8))
+    $spEvent.Graphics.DrawArc($spPen, $spRect, $script:waitSpinnerAngle, 120)
+    $spPen.Dispose()
+})
+$waitSpinnerTimer = New-Object System.Windows.Forms.Timer
+$waitSpinnerTimer.Interval = 20
+$waitSpinnerTimer.Add_Tick({
+    $script:waitSpinnerAngle = ($script:waitSpinnerAngle + 8) % 360
+    $pnlWaitSpinner.Invalidate()
+})
+$waitSpinnerTimer.Start()
+
+function Show-Waiting($subText) {
+    $lblWaitSub.Text = $subText
+    $pnlConfig.Visible = $false
+    $pnlWaiting.Visible = $true
+    $pnlDecision.Visible = $false
+    $pnlProgress.Visible = $false
+    $pnlSummary.Visible = $false
+    $form.Text = ""Elaborazione in corso...""
+    $form.AcceptButton = $null
+    $form.CancelButton = $null
+    Center-Form $form 420 220
+}
+
+$btnScanConfig.Add_Click({
+    $out = @{}
+    $out[""Cancelled""] = ""0""
+    $out[""InputFolder""] = $txtIn.Text
+    $out[""OutputFolder""] = $txtOut.Text
+    $out[""ChordalTol""] = $numChordal.Value.ToString($ic)
+    $out[""AdjacencyTol""] = $numAdj.Value.ToString($ic)
+    $out[""AngularTol""] = $numAng.Value.ToString($ic)
+    $out[""ExportNotClosed""] = if ($chkExportOpen.Checked) { ""1"" } else { ""0"" }
+    Write-KeyValueFile (Join-Path $WorkDir ""config_output.txt"") $out
+    Show-Waiting ""Scansione dei conflitti in corso...""
+})
+
+$btnCancelConfig.Add_Click({
+    Write-KeyValueFile (Join-Path $WorkDir ""config_output.txt"") @{ ""Cancelled"" = ""1"" }
+    $form.Close()
+})
+
+# --- Pannello Decisione (mostrato solo se la scansione trova conflitti) ----
+$pnlDecision = New-Object System.Windows.Forms.Panel
+$pnlDecision.SetBounds(0, 0, 660, 520)
+$pnlDecision.BackColor = $ClrWindowBg
+$pnlDecision.Visible = $false
+$form.Controls.Add($pnlDecision)
+
+$lblTitleDecision = New-Object System.Windows.Forms.Label
+$lblTitleDecision.Text = ""Trovati conflitti - come procedere?""
+$lblTitleDecision.SetBounds(24, 20, 600, 30)
+Style-TitleLabel $lblTitleDecision
+$pnlDecision.Controls.Add($lblTitleDecision)
+
+$cardSummary = Add-Card $pnlDecision 14 64 620 350
+
+$txtSummary = New-Object System.Windows.Forms.TextBox
+$txtSummary.Multiline = $true
+$txtSummary.ReadOnly = $true
+$txtSummary.TabStop = $false
+$txtSummary.ScrollBars = ""Vertical""
+$txtSummary.SetBounds(24, 74, 600, 330)
+Style-TextBox $txtSummary
+$pnlDecision.Controls.Add($txtSummary)
+
+$cardSummary.SendToBack()
+
+$btnOverwrite = New-Object System.Windows.Forms.Button
+$btnOverwrite.Text = ""Sovrascrivi""
+$btnOverwrite.SetBounds(24, 424, 185, 42)
+$pnlDecision.Controls.Add($btnOverwrite)
+Style-PrimaryButton $btnOverwrite
+
+$btnCopy = New-Object System.Windows.Forms.Button
+$btnCopy.Text = ""Copia in nuova cartella""
+$btnCopy.SetBounds(222, 424, 205, 42)
+$pnlDecision.Controls.Add($btnCopy)
+Style-SecondaryButton $btnCopy
+
+$btnStop = New-Object System.Windows.Forms.Button
+$btnStop.Text = ""Interrompi""
+$btnStop.SetBounds(440, 424, 184, 42)
+$pnlDecision.Controls.Add($btnStop)
+Style-SecondaryButton $btnStop
+
+$btnOverwrite.Add_Click({
+    Write-KeyValueFile (Join-Path $WorkDir ""decision_output.txt"") @{ ""Decision"" = ""Overwrite"" }
+    Show-Waiting ""Avvio della conversione...""
+})
+$btnCopy.Add_Click({
+    Write-KeyValueFile (Join-Path $WorkDir ""decision_output.txt"") @{ ""Decision"" = ""Copy"" }
+    Show-Waiting ""Avvio della conversione...""
+})
+$btnStop.Add_Click({
+    Write-KeyValueFile (Join-Path $WorkDir ""decision_output.txt"") @{ ""Decision"" = ""Stop"" }
+    $form.Close()
+})
+
+# --- Pannello Avanzamento ----------------------------------------------------
+$pnlProgress = New-Object System.Windows.Forms.Panel
+$pnlProgress.SetBounds(0, 0, 560, 350)
+$pnlProgress.BackColor = $ClrWindowBg
+$pnlProgress.Visible = $false
+$form.Controls.Add($pnlProgress)
+
+$lblTitleProgress = New-Object System.Windows.Forms.Label
+$lblTitleProgress.Text = ""Conversione STEP -> STL in corso""
+$lblTitleProgress.SetBounds(24, 20, 260, 30)
+Style-TitleLabel $lblTitleProgress
+$pnlProgress.Controls.Add($lblTitleProgress)
+
+# Anteprima del pezzo che si sta esportando: il journal C# (dentro NX)
+# esporta la vista corrente direttamente su file JPG (nessun Bitmap
+# coinvolto li'); qui, in PowerShell, System.Drawing e' sempre coerente
+# con System.Windows.Forms, quindi possiamo tranquillamente caricarlo
+# in una PictureBox e ricaricarlo ad ogni tick del poll timer.
+$picPreview = New-Object System.Windows.Forms.PictureBox
+$picPreview.SetBounds(400, 16, 136, 102)
+$picPreview.BorderStyle = ""FixedSingle""
+$picPreview.BackColor = $ClrCardBg
+$picPreview.SizeMode = ""Zoom""
+$pnlProgress.Controls.Add($picPreview)
+
+$lblFile = New-Object System.Windows.Forms.Label
+$lblFile.Text = ""Preparazione...""
+$lblFile.SetBounds(24, 60, 360, 20)
+$lblFile.AutoEllipsis = $true
+Style-Label $lblFile
+$pnlProgress.Controls.Add($lblFile)
+
+$lblElapsed = New-Object System.Windows.Forms.Label
+$lblElapsed.Text = ""Tempo trascorso: 00:00:00""
+$lblElapsed.SetBounds(24, 84, 360, 20)
+Style-SubLabel $lblElapsed
+$pnlProgress.Controls.Add($lblElapsed)
+
+# Spinner circolare animato: qui (a differenza del journal C# dentro
+# NX) System.Windows.Forms e System.Drawing sono sempre la stessa
+# coppia coerente, quindi un Panel disegnato a mano con Graphics/Pen
+# funziona senza i problemi incontrati lato NX.
+$pnlSpinner = New-Object System.Windows.Forms.Panel
+$pnlSpinner.SetBounds(400, 128, 40, 40)
+$pnlSpinner.BackColor = $ClrWindowBg
+$pnlProgress.Controls.Add($pnlSpinner)
+
+$script:spinnerAngle = 0
+$pnlSpinner.Add_Paint({
+    param($spSender, $spEvent)
+    $spEvent.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $spPen = New-Object System.Drawing.Pen($ClrAccent, 4)
+    $spPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $spPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $spRect = New-Object System.Drawing.Rectangle(4, 4, ($spSender.Width - 8), ($spSender.Height - 8))
+    $spEvent.Graphics.DrawArc($spPen, $spRect, $script:spinnerAngle, 120)
+    $spPen.Dispose()
+})
+
+$progressSpinnerTimer = New-Object System.Windows.Forms.Timer
+$progressSpinnerTimer.Interval = 20
+$progressSpinnerTimer.Add_Tick({
+    $script:spinnerAngle = ($script:spinnerAngle + 8) % 360
+    $pnlSpinner.Invalidate()
+})
+
+$pnlTrack = New-Object System.Windows.Forms.Panel
+$pnlTrack.SetBounds(24, 176, 496, 14)
+$pnlTrack.BackColor = $ClrTrack
+$pnlTrack.Region = New-RoundedRegion $pnlTrack.Width $pnlTrack.Height 7
+$pnlProgress.Controls.Add($pnlTrack)
+
+$pnlFill = New-Object System.Windows.Forms.Panel
+$pnlFill.SetBounds(0, 0, 2, 14)
+$pnlFill.BackColor = $ClrAccent
+$pnlFill.Region = New-RoundedRegion 2 14 7
+$pnlTrack.Controls.Add($pnlFill)
+
+$lblCount = New-Object System.Windows.Forms.Label
+$lblCount.Text = ""0 di 0 completati""
+$lblCount.SetBounds(24, 200, 300, 20)
+Style-SubLabel $lblCount
+$pnlProgress.Controls.Add($lblCount)
+
+$lblStats = New-Object System.Windows.Forms.Label
+$lblStats.Text = """"
+$lblStats.SetBounds(24, 222, 496, 20)
+Style-SubLabel $lblStats
+$pnlProgress.Controls.Add($lblStats)
+
+$btnCancelProgress = New-Object System.Windows.Forms.Button
+$btnCancelProgress.Text = ""Annulla""
+$btnCancelProgress.SetBounds(370, 258, 150, 40)
+$pnlProgress.Controls.Add($btnCancelProgress)
+Style-SecondaryButton $btnCancelProgress
+
+$script:cancelRequested = $false
+$btnCancelProgress.Add_Click({
+    $script:cancelRequested = $true
+    $btnCancelProgress.Enabled = $false
+    $btnCancelProgress.Text = ""Annullamento...""
+    if (-not [string]::IsNullOrEmpty($script:progressOutFolder)) {
+        try {
+            if (-not (Test-Path -LiteralPath $script:progressOutFolder)) { New-Item -ItemType Directory -Path $script:progressOutFolder -Force | Out-Null }
+            Set-Content -LiteralPath (Join-Path $script:progressOutFolder ""CANCEL.txt"") -Value ""cancel"" -Encoding UTF8
+        } catch {
         }
-        Write-KeyValueFile $outputFile $out
     }
-    ""Decision"" {
-        $inputFile = Join-Path $WorkDir ""decision_input.txt""
-        $outputFile = Join-Path $WorkDir ""decision_output.txt""
-        $summaryText = """"
-        if (Test-Path -LiteralPath $inputFile) {
-            $summaryText = [string]::Join([Environment]::NewLine, (Get-Content -LiteralPath $inputFile -Encoding UTF8))
-        }
+})
 
-        $form = New-Object System.Windows.Forms.Form
-        $form.Text = ""Trovati conflitti - come procedere?""
-        $form.Width = 660
-        $form.Height = 520
-        $form.StartPosition = ""CenterScreen""
-        $form.FormBorderStyle = ""FixedDialog""
-        $form.MinimizeBox = $false
-        $form.MaximizeBox = $false
-        $form.Topmost = $true
-        Style-Form $form
-        Enable-FadeIn $form
+# Due timer separati: uno ""lento"" (poll) legge il file di stato scritto
+# dal batch e memorizza solo il target da raggiungere; uno ""veloce""
+# (render) anima la barra avvicinandola gradualmente al target ad ogni
+# tick, invece di farla scattare di colpo alla nuova percentuale. Quando
+# l'animazione raggiunge il target finale (Done=1 ricevuto), il render timer
+# NON chiude piu' la finestra: la fa passare al pannello ""Attesa"" in vista
+# del riepilogo finale, che il journal C# scrivera' a breve.
+$script:targetWidth = 2
+$script:doneReceived = $false
+$script:previewLastWrite = [DateTime]::MinValue
+$script:progressTotalInitial = 0
+$script:progressStatusFile = """"
+$script:previewPath = """"
+$script:progressOutFolder = """"
 
-        $lblTitle = New-Object System.Windows.Forms.Label
-        $lblTitle.Text = ""Trovati conflitti - come procedere?""
-        $lblTitle.SetBounds(24, 20, 600, 30)
-        Style-TitleLabel $lblTitle
-        $form.Controls.Add($lblTitle)
+$progressPollTimer = New-Object System.Windows.Forms.Timer
+$progressPollTimer.Interval = 300
+$progressPollTimer.Add_Tick({
+    $ts = (Get-Date) - $script:progressStartTime
+    $lblElapsed.Text = (""Tempo trascorso: {0:D2}:{1:D2}:{2:D2}"" -f [int]$ts.TotalHours, $ts.Minutes, $ts.Seconds)
 
-        $cardSummary = Add-Card $form 14 64 620 350
-
-        $txtSummary = New-Object System.Windows.Forms.TextBox
-        $txtSummary.Multiline = $true
-        $txtSummary.ReadOnly = $true
-        $txtSummary.TabStop = $false
-        $txtSummary.ScrollBars = ""Vertical""
-        $txtSummary.SetBounds(24, 74, 600, 330)
-        $txtSummary.Text = $summaryText
-        Style-TextBox $txtSummary
-        $form.Controls.Add($txtSummary)
-
-        $cardSummary.SendToBack()
-
-        $btnOverwrite = New-Object System.Windows.Forms.Button
-        $btnOverwrite.Text = ""Sovrascrivi""
-        $btnOverwrite.SetBounds(24, 424, 185, 42)
-        $form.Controls.Add($btnOverwrite)
-        Style-PrimaryButton $btnOverwrite
-
-        $btnCopy = New-Object System.Windows.Forms.Button
-        $btnCopy.Text = ""Copia in nuova cartella""
-        $btnCopy.SetBounds(222, 424, 205, 42)
-        $form.Controls.Add($btnCopy)
-        Style-SecondaryButton $btnCopy
-
-        $btnStop = New-Object System.Windows.Forms.Button
-        $btnStop.Text = ""Interrompi""
-        $btnStop.SetBounds(440, 424, 184, 42)
-        $form.Controls.Add($btnStop)
-        Style-SecondaryButton $btnStop
-
-        $script:decision = ""Stop""
-        $btnOverwrite.Add_Click({ $script:decision = ""Overwrite""; $form.Close() })
-        $btnCopy.Add_Click({ $script:decision = ""Copy""; $form.Close() })
-        $btnStop.Add_Click({ $script:decision = ""Stop""; $form.Close() })
-
-        [void]$form.ShowDialog()
-
-        Write-KeyValueFile $outputFile @{ ""Decision"" = $script:decision }
-    }
-    ""Progress"" {
-        $metaFile = Join-Path $WorkDir ""progress_meta.txt""
-        $statusFile = Join-Path $WorkDir ""progress_status.txt""
-        $meta = Read-KeyValueFile $metaFile
-        $outFolder = $meta[""OutputFolder""]
-        $totalInitial = 0
-        [int]::TryParse($meta[""Total""], [ref]$totalInitial) | Out-Null
-
-        $form = New-Object System.Windows.Forms.Form
-        $form.Text = ""Conversione in corso...""
-        $form.Width = 560
-        $form.Height = 270
-        $form.StartPosition = ""CenterScreen""
-        $form.FormBorderStyle = ""FixedDialog""
-        $form.MinimizeBox = $false
-        $form.MaximizeBox = $false
-        $form.Topmost = $true
-        Style-Form $form
-        Enable-FadeIn $form
-
-        $lblTitle = New-Object System.Windows.Forms.Label
-        $lblTitle.Text = ""Conversione STEP -> STL in corso""
-        $lblTitle.SetBounds(24, 20, 500, 30)
-        Style-TitleLabel $lblTitle
-        $form.Controls.Add($lblTitle)
-
-        $lblFile = New-Object System.Windows.Forms.Label
-        $lblFile.Text = ""Preparazione...""
-        $lblFile.SetBounds(24, 64, 500, 20)
-        $lblFile.AutoEllipsis = $true
-        Style-Label $lblFile
-        $form.Controls.Add($lblFile)
-
-        $pnlTrack = New-Object System.Windows.Forms.Panel
-        $pnlTrack.SetBounds(24, 96, 496, 14)
-        $pnlTrack.BackColor = $ClrTrack
-        $pnlTrack.Region = New-RoundedRegion $pnlTrack.Width $pnlTrack.Height 7
-        $form.Controls.Add($pnlTrack)
-
-        $pnlFill = New-Object System.Windows.Forms.Panel
-        $pnlFill.SetBounds(0, 0, 2, 14)
-        $pnlFill.BackColor = $ClrAccent
-        $pnlFill.Region = New-RoundedRegion 2 14 7
-        $pnlTrack.Controls.Add($pnlFill)
-
-        $lblCount = New-Object System.Windows.Forms.Label
-        $lblCount.Text = (""0 di {0} completati"" -f $totalInitial)
-        $lblCount.SetBounds(24, 120, 300, 20)
-        Style-SubLabel $lblCount
-        $form.Controls.Add($lblCount)
-
-        $lblStats = New-Object System.Windows.Forms.Label
-        $lblStats.Text = """"
-        $lblStats.SetBounds(24, 142, 496, 20)
-        Style-SubLabel $lblStats
-        $form.Controls.Add($lblStats)
-
-        $btnCancel = New-Object System.Windows.Forms.Button
-        $btnCancel.Text = ""Annulla""
-        $btnCancel.SetBounds(370, 178, 150, 40)
-        $form.Controls.Add($btnCancel)
-        Style-SecondaryButton $btnCancel
-
-        $script:cancelRequested = $false
-        $btnCancel.Add_Click({
-            $script:cancelRequested = $true
-            $btnCancel.Enabled = $false
-            $btnCancel.Text = ""Annullamento...""
-            if (-not [string]::IsNullOrEmpty($outFolder)) {
-                try {
-                    if (-not (Test-Path -LiteralPath $outFolder)) { New-Item -ItemType Directory -Path $outFolder -Force | Out-Null }
-                    Set-Content -LiteralPath (Join-Path $outFolder ""CANCEL.txt"") -Value ""cancel"" -Encoding UTF8
-                } catch {
-                }
+    # Ricarica la preview solo se il file e' cambiato dall'ultima
+    # lettura. ReadAllBytes + MemoryStream (invece di Image]::FromFile)
+    # evita di tenere il file JPG bloccato: il lato NX deve poter
+    # sovrascriverlo liberamente al giro successivo. Un fallimento
+    # (es. file colto a meta' scrittura) si ritenta semplicemente al
+    # prossimo tick, senza mai interrompere la conversione.
+    if (Test-Path -LiteralPath $script:previewPath) {
+        try {
+            $fi = Get-Item -LiteralPath $script:previewPath
+            if ($fi.LastWriteTimeUtc -ne $script:previewLastWrite) {
+                $imgBytes = [System.IO.File]::ReadAllBytes($script:previewPath)
+                $imgStream = New-Object System.IO.MemoryStream(,$imgBytes)
+                $newImg = [System.Drawing.Image]::FromStream($imgStream)
+                $oldImg = $picPreview.Image
+                $picPreview.Image = $newImg
+                if ($oldImg) { $oldImg.Dispose() }
+                $script:previewLastWrite = $fi.LastWriteTimeUtc
             }
-        })
+        } catch {
+        }
+    }
 
-        # Due timer separati: uno ""lento"" (poll) legge il file di stato scritto
-        # dal batch e memorizza solo il target da raggiungere; uno ""veloce""
-        # (render) anima la barra avvicinandola gradualmente al target ad ogni
-        # tick, invece di farla scattare di colpo alla nuova percentuale. La
-        # chiusura della finestra avviene nel render timer, solo dopo che
-        # l'animazione ha raggiunto il target finale, cosi' l'utente vede
-        # sempre la barra arrivare visibilmente al 100% prima che si chiuda.
+    $st = Read-KeyValueFile $script:progressStatusFile
+    if ($st.Count -eq 0) { return }
+
+    $cur = 0
+    $tot = $script:progressTotalInitial
+    $okCount = 0
+    $failCount = 0
+    [int]::TryParse($st[""Current""], [ref]$cur) | Out-Null
+    [int]::TryParse($st[""Total""], [ref]$tot) | Out-Null
+    [int]::TryParse($st[""Ok""], [ref]$okCount) | Out-Null
+    [int]::TryParse($st[""Failed""], [ref]$failCount) | Out-Null
+    $fileName = $st[""FileName""]
+
+    $totForPct = $tot
+    if ($totForPct -le 0) { $totForPct = 1 }
+    $pct = [double]$cur / [double]$totForPct
+    if ($pct -lt 0) { $pct = 0 }
+    if ($pct -gt 1) { $pct = 1 }
+
+    $newTarget = [int]($pnlTrack.Width * $pct)
+    if ($newTarget -lt 2) { $newTarget = 2 }
+    if ($newTarget -gt $pnlTrack.Width) { $newTarget = $pnlTrack.Width }
+    $script:targetWidth = $newTarget
+
+    if ([string]::IsNullOrEmpty($fileName)) {
+        $lblFile.Text = ""Elaborazione in corso...""
+    } else {
+        $lblFile.Text = (""In elaborazione: {0}"" -f $fileName)
+    }
+    $lblCount.Text = (""{0} di {1} completati ({2}%)"" -f $cur, $tot, [int]($pct * 100))
+    $lblStats.Text = (""Riusciti: {0}    Falliti: {1}"" -f $okCount, $failCount)
+
+    if ($st[""Done""] -eq ""1"") {
+        $script:doneReceived = $true
+    }
+})
+
+$progressRenderTimer = New-Object System.Windows.Forms.Timer
+$progressRenderTimer.Interval = 30
+$progressRenderTimer.Add_Tick({
+    $currentWidth = $pnlFill.Width
+    $delta = $script:targetWidth - $currentWidth
+    if ([Math]::Abs($delta) -gt 0) {
+        $step = [int]($delta * 0.3)
+        if ($step -eq 0) { $step = if ($delta -gt 0) { 1 } else { -1 } }
+        $newWidth = $currentWidth + $step
+        if ($newWidth -lt 2) { $newWidth = 2 }
+        if ($newWidth -gt $pnlTrack.Width) { $newWidth = $pnlTrack.Width }
+        $pnlFill.Width = $newWidth
+        $pnlFill.Region = New-RoundedRegion $newWidth $pnlFill.Height 7
+    }
+
+    if ($script:doneReceived -and $pnlFill.Width -ge $script:targetWidth) {
+        $progressPollTimer.Stop()
+        $progressRenderTimer.Stop()
+        $progressSpinnerTimer.Stop()
+        if ($picPreview.Image) { $picPreview.Image.Dispose(); $picPreview.Image = $null }
+        Show-Waiting ""Preparazione del riepilogo...""
+    }
+})
+
+# --- Pannello Riepilogo finale -----------------------------------------------
+$pnlSummary = New-Object System.Windows.Forms.Panel
+$pnlSummary.SetBounds(0, 0, 620, 460)
+$pnlSummary.BackColor = $ClrWindowBg
+$pnlSummary.Visible = $false
+$form.Controls.Add($pnlSummary)
+
+$lblTitleSummary = New-Object System.Windows.Forms.Label
+$lblTitleSummary.Text = ""Conversione completata""
+$lblTitleSummary.SetBounds(24, 20, 560, 30)
+Style-TitleLabel $lblTitleSummary
+$pnlSummary.Controls.Add($lblTitleSummary)
+
+$cardFinal = Add-Card $pnlSummary 14 64 580 300
+
+$txtFinal = New-Object System.Windows.Forms.TextBox
+$txtFinal.Multiline = $true
+$txtFinal.ReadOnly = $true
+$txtFinal.TabStop = $false
+$txtFinal.ScrollBars = ""Vertical""
+$txtFinal.SetBounds(24, 74, 560, 280)
+Style-TextBox $txtFinal
+$pnlSummary.Controls.Add($txtFinal)
+
+$cardFinal.SendToBack()
+
+$btnOpen = New-Object System.Windows.Forms.Button
+$btnOpen.Text = ""Apri cartella di output""
+$btnOpen.SetBounds(24, 368, 230, 42)
+$pnlSummary.Controls.Add($btnOpen)
+Style-SecondaryButton $btnOpen
+$script:summaryOutFolder = """"
+$btnOpen.Add_Click({
+    if (Test-Path -LiteralPath $script:summaryOutFolder) { Start-Process -FilePath ""explorer.exe"" -ArgumentList @($script:summaryOutFolder) }
+})
+
+$btnClose = New-Object System.Windows.Forms.Button
+$btnClose.Text = ""Chiudi""
+$btnClose.SetBounds(414, 368, 170, 42)
+$pnlSummary.Controls.Add($btnClose)
+Style-PrimaryButton $btnClose
+$btnClose.Add_Click({ $form.Close() })
+
+# --- Orchestratore: sorveglia ""next_stage.txt"", scritto dal journal C# per
+# dire alla finestra (attualmente sul pannello Attesa) quale pannello
+# mostrare quando ha finito di calcolare la fase successiva. -----------------
+$script:nextStagePath = Join-Path $WorkDir ""next_stage.txt""
+
+$orchTimer = New-Object System.Windows.Forms.Timer
+$orchTimer.Interval = 200
+$orchTimer.Add_Tick({
+    if (-not (Test-Path -LiteralPath $script:nextStagePath)) { return }
+    $cmd = Read-KeyValueFile $script:nextStagePath
+    try { Remove-Item -LiteralPath $script:nextStagePath -Force -ErrorAction SilentlyContinue } catch {}
+    $stageName = $cmd[""Stage""]
+
+    if ($stageName -eq ""Decision"") {
+        $decisionInputFile = Join-Path $WorkDir ""decision_input.txt""
+        $summaryText = """"
+        if (Test-Path -LiteralPath $decisionInputFile) {
+            $summaryText = [string]::Join([Environment]::NewLine, (Get-Content -LiteralPath $decisionInputFile -Encoding UTF8))
+        }
+        $txtSummary.Text = $summaryText
+
+        $pnlConfig.Visible = $false
+        $pnlWaiting.Visible = $false
+        $pnlProgress.Visible = $false
+        $pnlSummary.Visible = $false
+        $pnlDecision.Visible = $true
+        $form.Text = ""Trovati conflitti - come procedere?""
+        $form.AcceptButton = $null
+        $form.CancelButton = $null
+        Center-Form $form 660 520
+    }
+    elseif ($stageName -eq ""Progress"") {
+        $progMeta = Read-KeyValueFile (Join-Path $WorkDir ""progress_meta.txt"")
+        $script:progressOutFolder = $progMeta[""OutputFolder""]
+        $script:progressStatusFile = Join-Path $WorkDir ""progress_status.txt""
+        $script:previewPath = Join-Path $WorkDir ""preview.jpg""
+        $script:previewLastWrite = [DateTime]::MinValue
+        $script:progressTotalInitial = 0
+        [int]::TryParse($progMeta[""Total""], [ref]$script:progressTotalInitial) | Out-Null
+
+        $lblFile.Text = ""Preparazione...""
+        $lblElapsed.Text = ""Tempo trascorso: 00:00:00""
+        $lblCount.Text = (""0 di {0} completati"" -f $script:progressTotalInitial)
+        $lblStats.Text = """"
+        $pnlFill.Width = 2
+        $pnlFill.Region = New-RoundedRegion 2 $pnlFill.Height 7
+        if ($picPreview.Image) { $picPreview.Image.Dispose(); $picPreview.Image = $null }
+
+        $script:progressStartTime = Get-Date
         $script:targetWidth = 2
         $script:doneReceived = $false
+        $script:cancelRequested = $false
+        $btnCancelProgress.Enabled = $true
+        $btnCancelProgress.Text = ""Annulla""
 
-        $pollTimer = New-Object System.Windows.Forms.Timer
-        $pollTimer.Interval = 300
-        $pollTimer.Add_Tick({
-            $st = Read-KeyValueFile $statusFile
-            if ($st.Count -eq 0) { return }
+        $pnlConfig.Visible = $false
+        $pnlWaiting.Visible = $false
+        $pnlDecision.Visible = $false
+        $pnlSummary.Visible = $false
+        $pnlProgress.Visible = $true
+        $form.Text = ""Conversione in corso...""
+        $form.AcceptButton = $null
+        $form.CancelButton = $null
+        Center-Form $form 560 350
 
-            $cur = 0
-            $tot = $totalInitial
-            $okCount = 0
-            $failCount = 0
-            [int]::TryParse($st[""Current""], [ref]$cur) | Out-Null
-            [int]::TryParse($st[""Total""], [ref]$tot) | Out-Null
-            [int]::TryParse($st[""Ok""], [ref]$okCount) | Out-Null
-            [int]::TryParse($st[""Failed""], [ref]$failCount) | Out-Null
-            $fileName = $st[""FileName""]
-
-            $totForPct = $tot
-            if ($totForPct -le 0) { $totForPct = 1 }
-            $pct = [double]$cur / [double]$totForPct
-            if ($pct -lt 0) { $pct = 0 }
-            if ($pct -gt 1) { $pct = 1 }
-
-            $newTarget = [int]($pnlTrack.Width * $pct)
-            if ($newTarget -lt 2) { $newTarget = 2 }
-            if ($newTarget -gt $pnlTrack.Width) { $newTarget = $pnlTrack.Width }
-            $script:targetWidth = $newTarget
-
-            if ([string]::IsNullOrEmpty($fileName)) {
-                $lblFile.Text = ""Elaborazione in corso...""
-            } else {
-                $lblFile.Text = (""In elaborazione: {0}"" -f $fileName)
-            }
-            $lblCount.Text = (""{0} di {1} completati ({2}%)"" -f $cur, $tot, [int]($pct * 100))
-            $lblStats.Text = (""Riusciti: {0}    Falliti: {1}"" -f $okCount, $failCount)
-
-            if ($st[""Done""] -eq ""1"") {
-                $script:doneReceived = $true
-            }
-        })
-
-        $renderTimer = New-Object System.Windows.Forms.Timer
-        $renderTimer.Interval = 30
-        $renderTimer.Add_Tick({
-            $currentWidth = $pnlFill.Width
-            $delta = $script:targetWidth - $currentWidth
-            if ([Math]::Abs($delta) -gt 0) {
-                $step = [int]($delta * 0.3)
-                if ($step -eq 0) { $step = if ($delta -gt 0) { 1 } else { -1 } }
-                $newWidth = $currentWidth + $step
-                if ($newWidth -lt 2) { $newWidth = 2 }
-                if ($newWidth -gt $pnlTrack.Width) { $newWidth = $pnlTrack.Width }
-                $pnlFill.Width = $newWidth
-                $pnlFill.Region = New-RoundedRegion $newWidth $pnlFill.Height 7
-            }
-
-            if ($script:doneReceived -and $pnlFill.Width -ge $script:targetWidth) {
-                $pollTimer.Stop()
-                $renderTimer.Stop()
-                $form.Close()
-            }
-        })
-
-        $pollTimer.Start()
-        $renderTimer.Start()
-
-        [void]$form.ShowDialog()
-        $pollTimer.Stop()
-        $pollTimer.Dispose()
-        $renderTimer.Stop()
-        $renderTimer.Dispose()
+        $progressPollTimer.Start()
+        $progressRenderTimer.Start()
+        $progressSpinnerTimer.Start()
     }
-    ""Summary"" {
-        $inputFile = Join-Path $WorkDir ""summary_input.txt""
-        $metaFile = Join-Path $WorkDir ""summary_meta.txt""
-        $summaryText = """"
-        if (Test-Path -LiteralPath $inputFile) {
-            $summaryText = [string]::Join([Environment]::NewLine, (Get-Content -LiteralPath $inputFile -Encoding UTF8))
+    elseif ($stageName -eq ""Summary"") {
+        $summaryInputFile = Join-Path $WorkDir ""summary_input.txt""
+        $summaryText2 = """"
+        if (Test-Path -LiteralPath $summaryInputFile) {
+            $summaryText2 = [string]::Join([Environment]::NewLine, (Get-Content -LiteralPath $summaryInputFile -Encoding UTF8))
         }
-        $meta = Read-KeyValueFile $metaFile
-        $outFolder = $meta[""OutputFolder""]
+        $summaryMeta = Read-KeyValueFile (Join-Path $WorkDir ""summary_meta.txt"")
+        $script:summaryOutFolder = $summaryMeta[""OutputFolder""]
+        $txtFinal.Text = $summaryText2
 
-        $form = New-Object System.Windows.Forms.Form
+        $pnlConfig.Visible = $false
+        $pnlWaiting.Visible = $false
+        $pnlDecision.Visible = $false
+        $pnlProgress.Visible = $false
+        $pnlSummary.Visible = $true
         $form.Text = ""Conversione completata""
-        $form.Width = 620
-        $form.Height = 460
-        $form.StartPosition = ""CenterScreen""
-        $form.FormBorderStyle = ""FixedDialog""
-        $form.MinimizeBox = $false
-        $form.MaximizeBox = $false
-        $form.Topmost = $true
-        Style-Form $form
-        Enable-FadeIn $form
-
-        $lblTitle = New-Object System.Windows.Forms.Label
-        $lblTitle.Text = ""Conversione completata""
-        $lblTitle.SetBounds(24, 20, 560, 30)
-        Style-TitleLabel $lblTitle
-        $form.Controls.Add($lblTitle)
-
-        $cardFinal = Add-Card $form 14 64 580 300
-
-        $txt = New-Object System.Windows.Forms.TextBox
-        $txt.Multiline = $true
-        $txt.ReadOnly = $true
-        $txt.TabStop = $false
-        $txt.ScrollBars = ""Vertical""
-        $txt.SetBounds(24, 74, 560, 280)
-        $txt.Text = $summaryText
-        Style-TextBox $txt
-        $form.Controls.Add($txt)
-
-        $cardFinal.SendToBack()
-
-        $btnOpen = New-Object System.Windows.Forms.Button
-        $btnOpen.Text = ""Apri cartella di output""
-        $btnOpen.SetBounds(24, 368, 230, 42)
-        $form.Controls.Add($btnOpen)
-        Style-SecondaryButton $btnOpen
-        $btnOpen.Add_Click({
-            if (Test-Path -LiteralPath $outFolder) { Start-Process -FilePath ""explorer.exe"" -ArgumentList @($outFolder) }
-        })
-
-        $btnClose = New-Object System.Windows.Forms.Button
-        $btnClose.Text = ""Chiudi""
-        $btnClose.SetBounds(414, 368, 170, 42)
-        $form.Controls.Add($btnClose)
-        Style-PrimaryButton $btnClose
-        $btnClose.Add_Click({ $form.Close() })
         $form.AcceptButton = $btnClose
+        $form.CancelButton = $null
+        Center-Form $form 620 460
+    }
+})
+$orchTimer.Start()
 
-        [void]$form.ShowDialog()
-    }
-    default {
-        Write-Error (""Stage sconosciuto: "" + $Stage)
-        exit 1
-    }
-}
+# --- Avvio: mostra subito il pannello Config, poi resta aperta per tutta la
+# durata del run (le fasi successive sono solo cambi di pannello, mai una
+# nuova finestra). ------------------------------------------------------------
+$pnlConfig.Visible = $true
+$form.AcceptButton = $btnScanConfig
+$form.CancelButton = $btnCancelConfig
+Center-Form $form 720 580
+Enable-FadeIn $form
+
+# Senza questo, il primo campo di testo riceve il focus all'apertura
+# e Windows ne seleziona automaticamente tutto il contenuto (il
+# testo appare ""sempre evidenziato in blu""). Sposto solo il cursore
+# a inizio testo, senza selezionare nulla.
+$form.Add_Shown({ $txtIn.Select(0, 0) })
+
+[void]$form.ShowDialog()
+
+$orchTimer.Stop()
+$orchTimer.Dispose()
+$waitSpinnerTimer.Stop()
+$waitSpinnerTimer.Dispose()
+$progressPollTimer.Stop()
+$progressPollTimer.Dispose()
+$progressRenderTimer.Stop()
+$progressRenderTimer.Dispose()
+$progressSpinnerTimer.Stop()
+$progressSpinnerTimer.Dispose()
+if ($picPreview.Image) { $picPreview.Image.Dispose() }
 ";
 
-    // Percorso PRIMARIO: mostra la GUI vera lanciando powershell.exe come
-    // processo SEPARATO da quello di NX (vedi il changelog v12 in cima al
-    // file per il perche'). Gestisce, in ordine: schermata di configurazione
-    // (cartelle + opzioni avanzate), scansione preventiva, ed EVENTUALMENTE
-    // (solo se la scansione trova conflitti) la schermata di decisione.
-    // Qualunque eccezione qui dentro (powershell.exe non trovato, processo
-    // che non produce il file di output atteso, ecc.) risale a Main(), che
-    // la intercetta e passa al fallback - stessa logica di degradazione
+    // Percorso PRIMARIO: mostra la GUI vera lanciando UN SOLO processo
+    // powershell.exe, separato da quello di NX (vedi il changelog v12 in
+    // cima al file per il perche'), che resta vivo per l'intera durata del
+    // run e cambia semplicemente pannello al suo interno (vedi il commento
+    // in testa a ExternalGuiScriptSource) - mai un nuovo processo/finestra
+    // per fase. Gestisce, in ordine: schermata di configurazione (cartelle +
+    // opzioni avanzate), scansione preventiva, ed EVENTUALMENTE (solo se la
+    // scansione trova conflitti) la schermata di decisione. Qualunque
+    // eccezione qui dentro (powershell.exe non trovato, processo che non
+    // produce il file di output atteso, ecc.) risale a Main(), che la
+    // intercetta e passa al fallback - stessa logica di degradazione
     // automatica e trasparente gia' in uso dalle versioni precedenti.
     private static BatchDecision RunExternalGuiFlow(ListingWindow lw)
     {
@@ -1177,71 +1441,127 @@ switch ($Stage) {
         configInput["ExportNotClosed"] = exportNotClosedMeshes ? "1" : "0";
         WriteKeyValueFile(Path.Combine(workDir, "config_input.txt"), configInput);
 
-        RunPowerShellStage(scriptPath, workDir, "Config");
-        Dictionary<string, string> configOutput = ReadKeyValueFile(Path.Combine(workDir, "config_output.txt"));
+        externalGuiProcess = StartPersistentExternalGui(scriptPath, workDir);
 
-        if (configOutput.Count == 0 || GetFlag(configOutput, "Cancelled"))
+        // Da qui in poi la finestra persistente resta aperta finche' non la
+        // si chiude esplicitamente (Annulla/Interrompi/Chiudi) o finche' il
+        // run non finisce: se una qualunque eccezione risale da qui (es. un
+        // errore durante la scansione preventiva), la finestra andrebbe
+        // altrimenti lasciata bloccata per sempre sul pannello "Attesa" -
+        // il try/catch la chiude esplicitamente prima di propagare
+        // l'eccezione a Main() (che passa al fallback).
+        try
         {
-            Log(lw, "Interrotto dall'utente durante la configurazione. Nessun file scritto.");
+            string configOutputPath = Path.Combine(workDir, "config_output.txt");
+            WaitForFileOrProcessExit(externalGuiProcess, configOutputPath, "Config");
+            Dictionary<string, string> configOutput = ReadKeyValueFile(configOutputPath);
+
+            if (configOutput.Count == 0 || GetFlag(configOutput, "Cancelled"))
+            {
+                Log(lw, "Interrotto dall'utente durante la configurazione. Nessun file scritto.");
+                return BatchDecision.Stop;
+            }
+
+            string chosenInputFolder = GetOrDefault(configOutput, "InputFolder", inputFolder);
+            string chosenOutputFolder = GetOrDefault(configOutput, "OutputFolder", configuredOutputFolder);
+
+            if (!Directory.Exists(chosenInputFolder))
+            {
+                Log(lw, "ERRORE: cartella di input non trovata: " + chosenInputFolder);
+                return BatchDecision.Stop;
+            }
+            inputFolder = chosenInputFolder;
+            configuredOutputFolder = chosenOutputFolder;
+            EnsureDirectory(configuredOutputFolder);
+
+            ApplyAdvancedOptions(
+                ParseInvariantDouble(configOutput, "ChordalTol", chordalTol),
+                ParseInvariantDouble(configOutput, "AdjacencyTol", adjacencyTol),
+                ParseInvariantDouble(configOutput, "AngularTol", angularTol),
+                GetFlag(configOutput, "ExportNotClosed"));
+
+            // Da qui in poi la finestra e' gia' sul pannello "Attesa" (l'ha
+            // mostrato lei stessa subito dopo aver scritto config_output.txt):
+            // la scansione sotto avviene mentre l'utente la vede semplicemente
+            // girare, senza alcuna finestra che si chiude o riappare.
+            ScanSummary summary = PreScanConflicts(inputFolder, configuredOutputFolder);
+            WriteScanSummaryFile(configuredOutputFolder, summary);
+
+            if (summary.ConflictCount == 0)
+            {
+                Log(lw, string.Format(
+                    "Scansione: {0} file STEP, nessun conflitto rilevato. Procedo automaticamente, senza chiedere altro.",
+                    summary.TotalSteps));
+                return BatchDecision.Overwrite;
+            }
+
+            File.WriteAllLines(Path.Combine(workDir, "decision_input.txt"), BuildScanSummaryLines(summary));
+            SignalNextStage(workDir, "Decision");
+
+            string decisionOutputPath = Path.Combine(workDir, "decision_output.txt");
+            WaitForFileOrProcessExit(externalGuiProcess, decisionOutputPath, "Decision");
+            Dictionary<string, string> decisionOutput = ReadKeyValueFile(decisionOutputPath);
+            string decisionStr = GetOrDefault(decisionOutput, "Decision", "Stop");
+
+            if (decisionStr == "Overwrite")
+            {
+                return BatchDecision.Overwrite;
+            }
+            if (decisionStr == "Copy")
+            {
+                return BatchDecision.CopyToNewFolder;
+            }
+
+            Log(lw, "Interrotto dall'utente dopo la scansione preventiva. Nessun file scritto.");
             return BatchDecision.Stop;
         }
-
-        string chosenInputFolder = GetOrDefault(configOutput, "InputFolder", inputFolder);
-        string chosenOutputFolder = GetOrDefault(configOutput, "OutputFolder", configuredOutputFolder);
-
-        if (!Directory.Exists(chosenInputFolder))
+        catch (Exception)
         {
-            Log(lw, "ERRORE: cartella di input non trovata: " + chosenInputFolder);
-            return BatchDecision.Stop;
+            TryCloseExternalGuiProcess();
+            throw;
         }
-        inputFolder = chosenInputFolder;
-        configuredOutputFolder = chosenOutputFolder;
-        EnsureDirectory(configuredOutputFolder);
+    }
 
-        ApplyAdvancedOptions(
-            ParseInvariantDouble(configOutput, "ChordalTol", chordalTol),
-            ParseInvariantDouble(configOutput, "AdjacencyTol", adjacencyTol),
-            ParseInvariantDouble(configOutput, "AngularTol", angularTol),
-            GetFlag(configOutput, "ExportNotClosed"));
-
-        ScanSummary summary = PreScanConflicts(inputFolder, configuredOutputFolder);
-        WriteScanSummaryFile(configuredOutputFolder, summary);
-
-        if (summary.ConflictCount == 0)
+    // Chiude (best-effort) la finestra persistente della GUI esterna quando
+    // qualcosa e' andato storto altrove e nessuno le direbbe piu' quale
+    // pannello mostrare dopo: senza questo resterebbe visibile per sempre
+    // sul pannello "Attesa", con la rotella che gira a vuoto. Un fallimento
+    // qui non deve mai mascherare l'errore originale.
+    private static void TryCloseExternalGuiProcess()
+    {
+        if (externalGuiProcess == null)
         {
-            Log(lw, string.Format(
-                "Scansione: {0} file STEP, nessun conflitto rilevato. Procedo automaticamente, senza chiedere altro.",
-                summary.TotalSteps));
-            return BatchDecision.Overwrite;
+            return;
         }
-
-        File.WriteAllLines(Path.Combine(workDir, "decision_input.txt"), BuildScanSummaryLines(summary));
-
-        RunPowerShellStage(scriptPath, workDir, "Decision");
-        Dictionary<string, string> decisionOutput = ReadKeyValueFile(Path.Combine(workDir, "decision_output.txt"));
-        string decisionStr = GetOrDefault(decisionOutput, "Decision", "Stop");
-
-        if (decisionStr == "Overwrite")
+        try
         {
-            return BatchDecision.Overwrite;
+            if (externalGuiProcess.HasExited)
+            {
+                return;
+            }
+            externalGuiProcess.CloseMainWindow();
+            if (!externalGuiProcess.WaitForExit(2000))
+            {
+                externalGuiProcess.Kill();
+            }
         }
-        if (decisionStr == "Copy")
+        catch (Exception)
         {
-            return BatchDecision.CopyToNewFolder;
+            // best-effort: la pulizia della finestra non deve mai nascondere l'errore originale
         }
-
-        Log(lw, "Interrotto dall'utente dopo la scansione preventiva. Nessun file scritto.");
-        return BatchDecision.Stop;
     }
 
     // Best-effort: mostra il riepilogo finale nella GUI esterna (testo +
-    // pulsante "Apri cartella di output"). Se qualcosa va storto qui la
-    // conversione e' comunque gia' completata e il suo esito e' gia' nel log
-    // e nella Listing Window: un fallimento in questo passo va solo loggato,
-    // non deve mai far sembrare fallita la conversione stessa.
+    // pulsante "Apri cartella di output"), nella STESSA finestra gia' aperta
+    // per tutto il run (nessun nuovo processo/finestra). Se qualcosa va
+    // storto qui la conversione e' comunque gia' completata e il suo esito
+    // e' gia' nel log e nella Listing Window: un fallimento in questo passo
+    // va solo loggato, non deve mai far sembrare fallita la conversione
+    // stessa.
     private static void TryShowExternalGuiSummary(ListingWindow lw, BatchResult result)
     {
-        if (string.IsNullOrEmpty(externalGuiWorkDir) || string.IsNullOrEmpty(externalGuiScriptPath))
+        if (string.IsNullOrEmpty(externalGuiWorkDir) || string.IsNullOrEmpty(externalGuiScriptPath)
+            || externalGuiProcess == null || externalGuiProcess.HasExited)
         {
             return;
         }
@@ -1280,7 +1600,13 @@ switch ($Stage) {
             meta["OutputFolder"] = result.OutputFolder ?? "";
             WriteKeyValueFile(Path.Combine(externalGuiWorkDir, "summary_meta.txt"), meta);
 
-            RunPowerShellStage(externalGuiScriptPath, externalGuiWorkDir, "Summary");
+            SignalNextStage(externalGuiWorkDir, "Summary");
+
+            // Blocca finche' l'utente non chiude la finestra di riepilogo
+            // (stesso comportamento sincrono delle versioni precedenti, solo
+            // che qui non c'e' un nuovo processo da avviare: e' lo stesso
+            // gia' in esecuzione dall'inizio del run).
+            externalGuiProcess.WaitForExit();
         }
         catch (Exception ex)
         {
@@ -1329,61 +1655,125 @@ switch ($Stage) {
         return scriptPath;
     }
 
-    // Lancia powershell.exe in attesa SINCRONA (WaitForExit): NXOpen non e'
-    // thread-safe, quindi il journal deve comunque bloccarsi finche' l'utente
-    // non ha finito con la finestra, esattamente come avrebbe fatto
-    // Form.ShowDialog(). -WindowStyle Hidden + CreateNoWindow nascondono la
-    // console di PowerShell (che qui non serve, e' solo un launcher): la
-    // finestra WinForms creata dallo script rimane comunque visibile
-    // normalmente, non essendo legata alla visibilita' della console.
-    // -ExecutionPolicy Bypass vale solo per QUESTO singolo processo (non
-    // cambia alcuna policy di sistema/utente) e non richiede diritti di
-    // amministratore.
-    private static void RunPowerShellStage(string scriptPath, string workDir, string stage)
-    {
-        string expectedOutputFile = null;
-        if (stage == "Config")
-        {
-            expectedOutputFile = Path.Combine(workDir, "config_output.txt");
-        }
-        else if (stage == "Decision")
-        {
-            expectedOutputFile = Path.Combine(workDir, "decision_output.txt");
-        }
-
-        ProcessStartInfo psi = new ProcessStartInfo();
-        psi.FileName = "powershell.exe";
-        psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" +
-            scriptPath + "\" -Stage " + stage + " -WorkDir \"" + workDir + "\"";
-        psi.UseShellExecute = false;
-        psi.CreateNoWindow = true;
-
-        using (Process process = Process.Start(psi))
-        {
-            process.WaitForExit();
-        }
-
-        if (expectedOutputFile != null && !File.Exists(expectedOutputFile))
-        {
-            throw new Exception("La GUI esterna non ha prodotto il file di risposta atteso per lo stage " + stage + ".");
-        }
-    }
-
-    // Avvia lo stage "Progress" della GUI esterna come processo powershell.exe
-    // SEPARATO, ma - a differenza di RunPowerShellStage - senza attendere che
-    // termini (niente WaitForExit): il batch deve continuare a girare e ad
-    // aggiornare periodicamente il file di stato (vedi WriteProgressStatus)
-    // mentre la finestra resta aperta. La finestra si chiude da sola quando
-    // vi legge Done=1 nel file di stato.
-    private static Process StartPowerShellProgressWindow(string scriptPath, string workDir)
+    // Avvia l'UNICO processo powershell.exe che ospitera' la GUI esterna per
+    // l'intera durata del run (vedi il commento in testa a
+    // ExternalGuiScriptSource): non e' piu' un launcher sincrono per singola
+    // fase, ma un processo di lunga durata, avviato una sola volta qui e mai
+    // riavviato. -WindowStyle Hidden + CreateNoWindow nascondono la console
+    // di PowerShell (che qui non serve, e' solo un launcher): la finestra
+    // WinForms creata dallo script rimane comunque visibile normalmente, non
+    // essendo legata alla visibilita' della console. -ExecutionPolicy Bypass
+    // vale solo per QUESTO singolo processo (non cambia alcuna policy di
+    // sistema/utente) e non richiede diritti di amministratore.
+    private static Process StartPersistentExternalGui(string scriptPath, string workDir)
     {
         ProcessStartInfo psi = new ProcessStartInfo();
         psi.FileName = "powershell.exe";
         psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" +
-            scriptPath + "\" -Stage Progress -WorkDir \"" + workDir + "\"";
+            scriptPath + "\" -WorkDir \"" + workDir + "\"";
         psi.UseShellExecute = false;
         psi.CreateNoWindow = true;
         return Process.Start(psi);
+    }
+
+    // Attende che la GUI esterna scriva il file di risposta atteso per la
+    // fase corrente (l'utente ha cliccato un pulsante in quel pannello),
+    // controllando periodicamente anche che il processo non sia terminato
+    // nel frattempo (es. l'utente ha chiuso la finestra con la X, o
+    // PowerShell e' crashato): in tal caso il file non arrivera' mai, quindi
+    // si segnala subito l'errore invece di restare in attesa per sempre.
+    private static void WaitForFileOrProcessExit(Process process, string expectedFile, string stageName)
+    {
+        while (!File.Exists(expectedFile))
+        {
+            if (process.HasExited)
+            {
+                throw new Exception("La GUI esterna si e' chiusa senza produrre il file di risposta atteso per lo stage " + stageName + ".");
+            }
+            System.Threading.Thread.Sleep(150);
+        }
+    }
+
+    // Scrive il "comando" che dice alla GUI esterna (attualmente ferma sul
+    // pannello di attesa con la rotella di caricamento) quale pannello
+    // mostrare non appena questo lato C# ha finito di calcolare la fase
+    // successiva (scansione conflitti completata, conversione avviata,
+    // riepilogo pronto). Il file viene consumato (cancellato) dallo script
+    // PowerShell non appena letto.
+    private static void SignalNextStage(string workDir, string stage)
+    {
+        Dictionary<string, string> cmd = new Dictionary<string, string>();
+        cmd["Stage"] = stage;
+        WriteKeyValueFile(Path.Combine(workDir, "next_stage.txt"), cmd);
+    }
+
+    // Ultimo istante (UTC) in cui e' stata tentata una cattura di anteprima:
+    // usato per non esportare un'immagine ad ogni singolo componente aperto
+    // durante un assieme con centinaia di parti (costoso e inutile - basta
+    // aggiornare la preview circa 2 volte al secondo).
+    private static DateTime lastPreviewCaptureUtc = DateTime.MinValue;
+    private static readonly TimeSpan MinPreviewCaptureInterval = TimeSpan.FromMilliseconds(500);
+
+    // Esporta la vista corrente direttamente su file JPG tramite l'API nativa
+    // di NX (ImageExportBuilder): NESSUN tipo di System.Drawing.Common
+    // (Bitmap/Image/Graphics) e' coinvolto qui, il file finisce scritto su
+    // disco da NX stesso. Lo stage "Progress" della GUI esterna (PowerShell,
+    // dove System.Windows.Forms e System.Drawing sono sempre una coppia
+    // coerente) lo rilegge periodicamente e lo mostra in una PictureBox.
+    // Scrive prima su un file temporaneo e poi lo copia sul percorso finale,
+    // cosi' il lato PowerShell non legge mai un JPG a meta' scritto.
+    // Best-effort e silenzioso: un fallimento qui non deve MAI interrompere
+    // o rallentare la conversione, che e' la parte che conta davvero.
+    private static void CaptureAndDisplayScreenshot(Session theSession)
+    {
+        if (string.IsNullOrEmpty(externalGuiWorkDir))
+        {
+            return;
+        }
+        if (DateTime.UtcNow - lastPreviewCaptureUtc < MinPreviewCaptureInterval)
+        {
+            return;
+        }
+        lastPreviewCaptureUtc = DateTime.UtcNow;
+
+        try
+        {
+            Part displayPart = theSession.Parts.Display;
+            if (displayPart == null)
+            {
+                return;
+            }
+
+            string finalPath = Path.Combine(externalGuiWorkDir, "preview.jpg");
+            string tempPath = Path.Combine(externalGuiWorkDir, "preview_tmp_" + Guid.NewGuid().ToString("N") + ".jpg");
+
+            NXOpen.Gateway.ImageExportBuilder imageExportBuilder = displayPart.Views.CreateImageExportBuilder();
+            try
+            {
+                imageExportBuilder.RegionMode = false;
+                imageExportBuilder.DeviceWidth = 272;
+                imageExportBuilder.DeviceHeight = 204;
+                imageExportBuilder.FileFormat = NXOpen.Gateway.ImageExportBuilder.FileFormats.Jpg;
+                imageExportBuilder.FileName = tempPath;
+                imageExportBuilder.BackgroundOption = NXOpen.Gateway.ImageExportBuilder.BackgroundOptions.Original;
+                imageExportBuilder.EnhanceEdges = false;
+                imageExportBuilder.Commit();
+            }
+            finally
+            {
+                imageExportBuilder.Destroy();
+            }
+
+            if (File.Exists(tempPath))
+            {
+                File.Copy(tempPath, finalPath, true);
+                File.Delete(tempPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine("CaptureAndDisplayScreenshot failed: " + ex.Message);
+        }
     }
 
     // Scrive lo stato di avanzamento corrente nel formato chiave=valore che lo
@@ -1826,18 +2216,19 @@ switch ($Stage) {
 
         // Finestra di avanzamento con barra di progresso "live": mostrata solo
         // se la GUI esterna (PowerShell) e' quella in uso per questo run (vedi
-        // RunExternalGuiFlow). E' un processo powershell.exe SEPARATO, avviato
-        // qui in modo NON bloccante (a differenza di RunPowerShellStage), che
-        // legge periodicamente il file di stato scritto ad ogni file STEP
-        // processato (vedi WriteProgressStatus) e chiude da solo la finestra
-        // quando vi legge Done=1. Qualunque problema nell'avviarla e' non
-        // fatale: la conversione procede comunque, semplicemente senza la
-        // finestra di avanzamento.
+        // RunExternalGuiFlow), riusando la STESSA finestra/processo gia'
+        // aperto dall'inizio del run (nessun nuovo processo qui): le si dice
+        // solo di passare al pannello "Avanzamento" (SignalNextStage), che
+        // poi legge periodicamente il file di stato scritto ad ogni file
+        // STEP processato (vedi WriteProgressStatus) e torna da solo al
+        // pannello di attesa quando vi legge Done=1. Qualunque problema qui
+        // e' non fatale: la conversione procede comunque, semplicemente
+        // senza la finestra di avanzamento.
         bool showProgressWindow = !string.IsNullOrEmpty(externalGuiWorkDir)
             && !string.IsNullOrEmpty(externalGuiScriptPath)
+            && externalGuiProcess != null && !externalGuiProcess.HasExited
             && stepFiles.Count > 0;
         string progressStatusPath = null;
-        Process progressProcess = null;
         if (showProgressWindow)
         {
             try
@@ -1848,12 +2239,11 @@ switch ($Stage) {
                 progressMeta["Total"] = stepFiles.Count.ToString(CultureInfo.InvariantCulture);
                 WriteKeyValueFile(Path.Combine(externalGuiWorkDir, "progress_meta.txt"), progressMeta);
                 WriteProgressStatus(progressStatusPath, 0, stepFiles.Count, "", 0, 0, false);
-                progressProcess = StartPowerShellProgressWindow(externalGuiScriptPath, externalGuiWorkDir);
+                SignalNextStage(externalGuiWorkDir, "Progress");
             }
             catch (Exception)
             {
                 showProgressWindow = false;
-                progressProcess = null;
             }
         }
 
@@ -1975,9 +2365,29 @@ switch ($Stage) {
                     stepFile, DisplayPartOption.AllowAdditional, out partLoadStatus1);
                 DisposePartLoadStatus(partLoadStatus1);
 
+                // OpenActiveDisplay con AllowAdditional imposta la parte aperta come
+                // "Display" ma non sempre anche come "Work" (tipicamente capita per il
+                // primo file aperto nella sessione, quando non c'e' ancora una Work part):
+                // ApplicationSwitchImmediate pero' richiede una Work part valida, quindi
+                // va impostata esplicitamente se OpenActiveDisplay non l'ha gia' fatto.
                 Part workPart = theSession.Parts.Work;
+                if (workPart == null)
+                {
+                    workPart = basePart1 as Part;
+                    if (workPart != null)
+                    {
+                        theSession.Parts.SetWork(workPart);
+                    }
+                }
+                if (workPart == null)
+                {
+                    throw new Exception(
+                        "Impossibile aprire il file STEP come parte di lavoro (nessuna Work part disponibile dopo OpenActiveDisplay): " + stepFile);
+                }
                 theSession.ApplicationSwitchImmediate("UG_APP_MODELING");
                 theSession.CleanUpFacetedFacesAndEdges();
+
+                CaptureAndDisplayScreenshot(theSession);
 
                 TrySeparateMultiLumpBodies(theSession, lw, workPart);
 
@@ -2113,12 +2523,11 @@ switch ($Stage) {
         {
             if (showProgressWindow)
             {
+                // Segnala Done=1: il pannello di avanzamento, gia' aperto
+                // nella stessa finestra persistente, se ne accorge da solo
+                // (poll timer) e passa al pannello di attesa in vista del
+                // riepilogo finale - nessun processo da attendere qui.
                 WriteProgressStatus(progressStatusPath, ok + failed, stepFiles.Count, "", ok, failed, true);
-                if (progressProcess != null)
-                {
-                    try { progressProcess.WaitForExit(4000); }
-                    catch (Exception) { /* best-effort: la pulizia finale non dipende da questo */ }
-                }
             }
         }
 
@@ -2646,9 +3055,27 @@ switch ($Stage) {
                 prtPath, DisplayPartOption.AllowAdditional, out partLoadStatus1);
             DisposePartLoadStatus(partLoadStatus1);
 
+            // Vedi commento equivalente sull'apertura dello STEP: AllowAdditional non
+            // garantisce che la parte aperta diventi anche la Work part, che invece
+            // serve ad ApplicationSwitchImmediate.
             Part workPart = theSession.Parts.Work;
+            if (workPart == null)
+            {
+                workPart = basePart1 as Part;
+                if (workPart != null)
+                {
+                    theSession.Parts.SetWork(workPart);
+                }
+            }
+            if (workPart == null)
+            {
+                throw new Exception(
+                    "Impossibile aprire il file .prt come parte di lavoro (nessuna Work part disponibile dopo OpenActiveDisplay): " + prtPath);
+            }
             theSession.ApplicationSwitchImmediate("UG_APP_MODELING");
             theSession.CleanUpFacetedFacesAndEdges();
+
+            CaptureAndDisplayScreenshot(theSession);
 
             TrySeparateMultiLumpBodies(theSession, lw, workPart);
 
