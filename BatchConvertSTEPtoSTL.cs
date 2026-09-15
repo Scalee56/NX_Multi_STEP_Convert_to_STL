@@ -937,7 +937,7 @@ switch ($Stage) {
         $form = New-Object System.Windows.Forms.Form
         $form.Text = ""Conversione in corso...""
         $form.Width = 560
-        $form.Height = 270
+        $form.Height = 350
         $form.StartPosition = ""CenterScreen""
         $form.FormBorderStyle = ""FixedDialog""
         $form.MinimizeBox = $false
@@ -948,19 +948,68 @@ switch ($Stage) {
 
         $lblTitle = New-Object System.Windows.Forms.Label
         $lblTitle.Text = ""Conversione STEP -> STL in corso""
-        $lblTitle.SetBounds(24, 20, 500, 30)
+        $lblTitle.SetBounds(24, 20, 260, 30)
         Style-TitleLabel $lblTitle
         $form.Controls.Add($lblTitle)
 
+        # Anteprima del pezzo che si sta esportando: il journal C# (dentro NX)
+        # esporta la vista corrente direttamente su file JPG (nessun Bitmap
+        # coinvolto li'); qui, in PowerShell, System.Drawing e' sempre coerente
+        # con System.Windows.Forms, quindi possiamo tranquillamente caricarlo
+        # in una PictureBox e ricaricarlo ad ogni tick del poll timer.
+        $picPreview = New-Object System.Windows.Forms.PictureBox
+        $picPreview.SetBounds(400, 16, 136, 102)
+        $picPreview.BorderStyle = ""FixedSingle""
+        $picPreview.BackColor = $ClrCardBg
+        $picPreview.SizeMode = ""Zoom""
+        $form.Controls.Add($picPreview)
+        $script:previewPath = Join-Path $WorkDir ""preview.jpg""
+        $script:previewLastWrite = [DateTime]::MinValue
+
         $lblFile = New-Object System.Windows.Forms.Label
         $lblFile.Text = ""Preparazione...""
-        $lblFile.SetBounds(24, 64, 500, 20)
+        $lblFile.SetBounds(24, 60, 360, 20)
         $lblFile.AutoEllipsis = $true
         Style-Label $lblFile
         $form.Controls.Add($lblFile)
 
+        $lblElapsed = New-Object System.Windows.Forms.Label
+        $lblElapsed.Text = ""Tempo trascorso: 00:00:00""
+        $lblElapsed.SetBounds(24, 84, 360, 20)
+        Style-SubLabel $lblElapsed
+        $form.Controls.Add($lblElapsed)
+        $script:progressStartTime = Get-Date
+
+        # Spinner circolare animato: qui (a differenza del journal C# dentro
+        # NX) System.Windows.Forms e System.Drawing sono sempre la stessa
+        # coppia coerente, quindi un Panel disegnato a mano con Graphics/Pen
+        # funziona senza i problemi incontrati lato NX.
+        $pnlSpinner = New-Object System.Windows.Forms.Panel
+        $pnlSpinner.SetBounds(400, 128, 40, 40)
+        $pnlSpinner.BackColor = $ClrWindowBg
+        $form.Controls.Add($pnlSpinner)
+
+        $script:spinnerAngle = 0
+        $pnlSpinner.Add_Paint({
+            param($spSender, $spEvent)
+            $spEvent.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+            $spPen = New-Object System.Drawing.Pen($ClrAccent, 4)
+            $spPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+            $spPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+            $spRect = New-Object System.Drawing.Rectangle(4, 4, ($spSender.Width - 8), ($spSender.Height - 8))
+            $spEvent.Graphics.DrawArc($spPen, $spRect, $script:spinnerAngle, 120)
+            $spPen.Dispose()
+        })
+
+        $spinnerTimer = New-Object System.Windows.Forms.Timer
+        $spinnerTimer.Interval = 20
+        $spinnerTimer.Add_Tick({
+            $script:spinnerAngle = ($script:spinnerAngle + 8) % 360
+            $pnlSpinner.Invalidate()
+        })
+
         $pnlTrack = New-Object System.Windows.Forms.Panel
-        $pnlTrack.SetBounds(24, 96, 496, 14)
+        $pnlTrack.SetBounds(24, 176, 496, 14)
         $pnlTrack.BackColor = $ClrTrack
         $pnlTrack.Region = New-RoundedRegion $pnlTrack.Width $pnlTrack.Height 7
         $form.Controls.Add($pnlTrack)
@@ -973,19 +1022,19 @@ switch ($Stage) {
 
         $lblCount = New-Object System.Windows.Forms.Label
         $lblCount.Text = (""0 di {0} completati"" -f $totalInitial)
-        $lblCount.SetBounds(24, 120, 300, 20)
+        $lblCount.SetBounds(24, 200, 300, 20)
         Style-SubLabel $lblCount
         $form.Controls.Add($lblCount)
 
         $lblStats = New-Object System.Windows.Forms.Label
         $lblStats.Text = """"
-        $lblStats.SetBounds(24, 142, 496, 20)
+        $lblStats.SetBounds(24, 222, 496, 20)
         Style-SubLabel $lblStats
         $form.Controls.Add($lblStats)
 
         $btnCancel = New-Object System.Windows.Forms.Button
         $btnCancel.Text = ""Annulla""
-        $btnCancel.SetBounds(370, 178, 150, 40)
+        $btnCancel.SetBounds(370, 258, 150, 40)
         $form.Controls.Add($btnCancel)
         Style-SecondaryButton $btnCancel
 
@@ -1016,6 +1065,31 @@ switch ($Stage) {
         $pollTimer = New-Object System.Windows.Forms.Timer
         $pollTimer.Interval = 300
         $pollTimer.Add_Tick({
+            $ts = (Get-Date) - $script:progressStartTime
+            $lblElapsed.Text = (""Tempo trascorso: {0:D2}:{1:D2}:{2:D2}"" -f [int]$ts.TotalHours, $ts.Minutes, $ts.Seconds)
+
+            # Ricarica la preview solo se il file e' cambiato dall'ultima
+            # lettura. ReadAllBytes + MemoryStream (invece di Image]::FromFile)
+            # evita di tenere il file JPG bloccato: il lato NX deve poter
+            # sovrascriverlo liberamente al giro successivo. Un fallimento
+            # (es. file colto a meta' scrittura) si ritenta semplicemente al
+            # prossimo tick, senza mai interrompere la conversione.
+            if (Test-Path -LiteralPath $script:previewPath) {
+                try {
+                    $fi = Get-Item -LiteralPath $script:previewPath
+                    if ($fi.LastWriteTimeUtc -ne $script:previewLastWrite) {
+                        $imgBytes = [System.IO.File]::ReadAllBytes($script:previewPath)
+                        $imgStream = New-Object System.IO.MemoryStream(,$imgBytes)
+                        $newImg = [System.Drawing.Image]::FromStream($imgStream)
+                        $oldImg = $picPreview.Image
+                        $picPreview.Image = $newImg
+                        if ($oldImg) { $oldImg.Dispose() }
+                        $script:previewLastWrite = $fi.LastWriteTimeUtc
+                    }
+                } catch {
+                }
+            }
+
             $st = Read-KeyValueFile $statusFile
             if ($st.Count -eq 0) { return }
 
@@ -1071,18 +1145,23 @@ switch ($Stage) {
             if ($script:doneReceived -and $pnlFill.Width -ge $script:targetWidth) {
                 $pollTimer.Stop()
                 $renderTimer.Stop()
+                $spinnerTimer.Stop()
                 $form.Close()
             }
         })
 
         $pollTimer.Start()
         $renderTimer.Start()
+        $spinnerTimer.Start()
 
         [void]$form.ShowDialog()
         $pollTimer.Stop()
         $pollTimer.Dispose()
         $renderTimer.Stop()
         $renderTimer.Dispose()
+        $spinnerTimer.Stop()
+        $spinnerTimer.Dispose()
+        if ($picPreview.Image) { $picPreview.Image.Dispose() }
     }
     ""Summary"" {
         $inputFile = Join-Path $WorkDir ""summary_input.txt""
@@ -1391,6 +1470,75 @@ switch ($Stage) {
     // nello script PowerShell). Best-effort: un fallimento qui (es. file
     // temporaneamente bloccato) non deve mai interrompere la conversione,
     // che e' la parte che conta davvero.
+    // Ultimo istante (UTC) in cui e' stata tentata una cattura di anteprima:
+    // usato per non esportare un'immagine ad ogni singolo componente aperto
+    // durante un assieme con centinaia di parti (costoso e inutile - basta
+    // aggiornare la preview circa 2 volte al secondo).
+    private static DateTime lastPreviewCaptureUtc = DateTime.MinValue;
+    private static readonly TimeSpan MinPreviewCaptureInterval = TimeSpan.FromMilliseconds(500);
+
+    // Esporta la vista corrente direttamente su file JPG tramite l'API nativa
+    // di NX (ImageExportBuilder): NESSUN tipo di System.Drawing.Common
+    // (Bitmap/Image/Graphics) e' coinvolto qui, il file finisce scritto su
+    // disco da NX stesso. Lo stage "Progress" della GUI esterna (PowerShell,
+    // dove System.Windows.Forms e System.Drawing sono sempre una coppia
+    // coerente) lo rilegge periodicamente e lo mostra in una PictureBox.
+    // Scrive prima su un file temporaneo e poi lo copia sul percorso finale,
+    // cosi' il lato PowerShell non legge mai un JPG a meta' scritto.
+    // Best-effort e silenzioso: un fallimento qui non deve MAI interrompere
+    // o rallentare la conversione, che e' la parte che conta davvero.
+    private static void CaptureAndDisplayScreenshot(Session theSession)
+    {
+        if (string.IsNullOrEmpty(externalGuiWorkDir))
+        {
+            return;
+        }
+        if (DateTime.UtcNow - lastPreviewCaptureUtc < MinPreviewCaptureInterval)
+        {
+            return;
+        }
+        lastPreviewCaptureUtc = DateTime.UtcNow;
+
+        try
+        {
+            Part displayPart = theSession.Parts.Display;
+            if (displayPart == null)
+            {
+                return;
+            }
+
+            string finalPath = Path.Combine(externalGuiWorkDir, "preview.jpg");
+            string tempPath = Path.Combine(externalGuiWorkDir, "preview_tmp_" + Guid.NewGuid().ToString("N") + ".jpg");
+
+            NXOpen.Gateway.ImageExportBuilder imageExportBuilder = displayPart.Views.CreateImageExportBuilder();
+            try
+            {
+                imageExportBuilder.RegionMode = false;
+                imageExportBuilder.DeviceWidth = 272;
+                imageExportBuilder.DeviceHeight = 204;
+                imageExportBuilder.FileFormat = NXOpen.Gateway.ImageExportBuilder.FileFormats.Jpg;
+                imageExportBuilder.FileName = tempPath;
+                imageExportBuilder.BackgroundOption = NXOpen.Gateway.ImageExportBuilder.BackgroundOptions.Original;
+                imageExportBuilder.EnhanceEdges = false;
+                imageExportBuilder.Commit();
+            }
+            finally
+            {
+                imageExportBuilder.Destroy();
+            }
+
+            if (File.Exists(tempPath))
+            {
+                File.Copy(tempPath, finalPath, true);
+                File.Delete(tempPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine("CaptureAndDisplayScreenshot failed: " + ex.Message);
+        }
+    }
+
     private static void WriteProgressStatus(string path, int current, int total, string fileName, int ok, int failed, bool done)
     {
         try
@@ -1978,6 +2126,8 @@ switch ($Stage) {
                 Part workPart = theSession.Parts.Work;
                 theSession.ApplicationSwitchImmediate("UG_APP_MODELING");
                 theSession.CleanUpFacetedFacesAndEdges();
+
+                CaptureAndDisplayScreenshot(theSession);
 
                 TrySeparateMultiLumpBodies(theSession, lw, workPart);
 
@@ -2649,6 +2799,8 @@ switch ($Stage) {
             Part workPart = theSession.Parts.Work;
             theSession.ApplicationSwitchImmediate("UG_APP_MODELING");
             theSession.CleanUpFacetedFacesAndEdges();
+
+            CaptureAndDisplayScreenshot(theSession);
 
             TrySeparateMultiLumpBodies(theSession, lw, workPart);
 
