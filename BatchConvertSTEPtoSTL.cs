@@ -1,9 +1,86 @@
 // =============================================================================
-// NX Open Journal - Conversione massiva STEP -> STL (v10)
+// NX Open Journal - Conversione massiva STEP -> STL (v14.2)
 // Basato sul journal originale "journal.cs" (export singolo STL registrato in NX),
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
-// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v10):
+// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v14.2):
+// - FIX: il primo campo di testo/il testo di riepilogo appariva sempre
+//   completamente selezionato (evidenziato in blu) all'apertura di ogni
+//   finestra - comportamento di default di WinForms quando un controllo
+//   riceve il focus iniziale. Ora il cursore in Config parte a inizio testo
+//   senza selezione, e le caselle di riepilogo (sola lettura) non possono
+//   piu' ricevere il focus.
+// - FIX: le etichette (e le caselle di spunta) avevano uno sfondo grigio
+//   opaco invece che trasparente - visibile come un rettangolo grigio
+//   sopra le card bianche. Ora tutte le etichette hanno sfondo trasparente.
+// - FIX: i pulsanti bianchi (Sfoglia, Annulla, ecc.) mostravano un bordino
+//   scuro e angoli poco arrotondati - causato dallo scaling automatico di
+//   WinForms in base al DPI dello schermo, applicato DOPO che le regioni
+//   arrotondate erano gia' state calcolate. Disattivato lo scaling
+//   automatico e sostituito bianco+bordo con un riempimento grigio chiaro
+//   pieno, piu' robusto verso questo tipo di disallineamento.
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v14:
+// - ULTERIORE RIFINITURA GRAFICA della GUI esterna: gruppi di campi racchiusi
+//   in "card" bianche con angoli arrotondati su sfondo grigio chiaro (stile
+//   pannelli di Impostazioni di macOS), dissolvenza in apertura per tutte le
+//   finestre, e barra di avanzamento che ora scorre con un'animazione fluida
+//   verso la percentuale corrente invece di scattare di colpo.
+// - OTTIMIZZAZIONE VELOCITA': il file di log incrementale (log_conversione.txt)
+//   veniva riaperto e richiuso ad ogni singola riga scritta durante il batch
+//   (File.AppendAllText). Ora l'handle resta aperto per tutta la conversione
+//   (con Flush() dopo ogni riga per mantenere la stessa protezione in caso di
+//   crash): elimina un overhead di apertura/chiusura file per ogni riga di
+//   log, piu' evidente su cartelle di rete o con antivirus che intercetta
+//   ogni apertura file.
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v13:
+// - RESTYLING GRAFICO di tutte le finestre della GUI esterna (PowerShell):
+//   font Segoe UI, palette chiara, pulsanti piatti con angoli arrotondati e
+//   colore d'accento al passaggio del mouse, al posto dei controlli WinForms
+//   di default (bordi 3D "vecchio Windows").
+// - TORNATA la finestra di avanzamento in tempo reale con barra di progresso
+//   (era stata rimossa in v12 insieme a LauncherForm): e' di nuovo un
+//   processo powershell.exe separato, avviato senza bloccare la conversione,
+//   che mostra file corrente, percentuale, conteggio riusciti/falliti e un
+//   pulsante Annulla (scrive lo stesso marker CANCEL.txt gia' in uso). Si
+//   aggiorna leggendo un file di stato scritto ad ogni file STEP processato,
+//   e si chiude da sola a fine conversione.
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v12:
+// - RIMOSSA definitivamente LauncherForm (System.Windows.Forms.Form): confermato
+//   su questa installazione NX, anche a sessione appena riavviata e con ogni
+//   mitigazione provata, che nessuna Form puo' mai aprirsi qui (mismatch
+//   strutturale tra le versioni di System.Windows.Forms e System.Drawing.Common
+//   caricate dal processo NX). Nessun trucco lato journal puo' risolverlo.
+// - NUOVO: al posto della Form, la GUI vera e propria (configurazione cartelle
+//   e opzioni avanzate, risoluzione conflitti, riepilogo finale) viene mostrata
+//   lanciando powershell.exe come PROCESSO SEPARATO da quello di NX. Windows
+//   PowerShell gira su .NET Framework classico, dove System.Windows.Forms e
+//   System.Drawing sono sempre la stessa coppia coerente: lo stesso crash non
+//   puo' quindi verificarsi li'. Il journal scrive uno script .ps1 in una
+//   cartella temporanea (nessun diritto di amministratore richiesto: sia
+//   l'avvio di powershell.exe sia la scrittura in %TEMP% sono operazioni
+//   normali di un utente standard), lo lancia in attesa sincrona, e si scambia
+//   dati con esso tramite semplici file di testo "chiave=valore" (cartelle
+//   scelte, opzioni avanzate, decisione sui conflitti). Se per qualunque
+//   motivo PowerShell non fosse disponibile in un dato ambiente, il journal lo
+//   rileva e ripiega automaticamente, in modo trasparente, sul flusso a soli
+//   MessageBox/FolderBrowserDialog (RunFallbackFlow) gia' presente dalla v9,
+//   con la stessa identica logica "chiedi solo se serve".
+// - Il pannello di avanzamento in tempo reale con barra di progresso (che
+//   viveva solo dentro LauncherForm) non esiste piu': l'avanzamento resta
+//   visibile nella Listing Window di NX e nel file di log, aggiornati riga per
+//   riga come gia' avveniva. L'annullamento a meta' batch resta possibile
+//   creando un file CANCEL.txt nella cartella di output (introdotto in v11).
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v11:
+// - Prima conferma (poi rivelatasi definitiva in v12) che nessuna Form poteva
+//   aprirsi su questa installazione NX. Portate nel fallback le funzionalita'
+//   che vivevano solo nella Form: annullamento via file marker CANCEL.txt, e
+//   una domanda opzionale per l'export dei corpi non chiusi.
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v10:
 // - NUOVO: la finestra grafica (LauncherForm) ora gestisce l'INTERO flusso in
 //   un'unica finestra, senza mai chiudersi e riaprirsi: configurazione
 //   cartelle -> (se servono) risoluzione conflitti -> avanzamento della
@@ -126,22 +203,21 @@
 //
 // ISTRUZIONI D'USO:
 // 1. In NX: Strumenti > Automazione > Journal > Riproduci... e seleziona
-//    questo file .cs. Si apre subito una finestra: verifica o modifica le
-//    cartelle di input (file STEP) e output (file STL) - di default sono
-//    quelle configurate qui sotto - ed eventualmente apri "Mostra opzioni
-//    avanzate" per cambiare le tolleranze STL o l'esportazione delle
-//    superfici non chiuse solo per questa esecuzione, poi premi
-//    "Avvia scansione".
+//    questo file .cs. Si apre subito una finestra vera (PowerShell): verifica
+//    o modifica le cartelle di input (file STEP) e output (file STL) - di
+//    default sono quelle configurate qui sotto - ed eventualmente apri
+//    "Mostra opzioni avanzate" per cambiare le tolleranze STL o
+//    l'esportazione delle superfici non chiuse solo per questa esecuzione,
+//    poi premi "Avvia scansione".
 // 2. La scansione confronta (senza aprire alcuna parte NX) cosa produrrebbe
-//    il batch con quanto gia' presente nella cartella di output, e mostra un
-//    riepilogo con una lista (Nuovo / OK / CONFLITTO per ogni file STEP).
+//    il batch con quanto gia' presente nella cartella di output. Se non
+//    trova conflitti si passa direttamente al punto 4, altrimenti appare una
+//    seconda finestra con il riepilogo (Nuovo / OK / CONFLITTO per ogni file
+//    STEP) e la scelta di come procedere.
 // 3. Scegli come procedere: "Interrompi" (esce, nessun file scritto),
 //    "Sovrascrivi" (procede, i conflitti rilevati vengono sovrascritti), o
 //    "Copia in nuova cartella" (tutto l'output di questo run va in una nuova
-//    sottocartella con timestamp, la cartella originale resta intatta). La
-//    stessa finestra passa quindi al pannello di avanzamento (barra di
-//    progresso, file corrente, log in tempo reale, bottone "Annulla") e
-//    infine al riepilogo finale, senza mai chiudersi nel frattempo.
+//    sottocartella con timestamp, la cartella originale resta intatta).
 // 4. Per ogni file .stp/.step:
 //    - i corpi solidi diretti vengono esportati, un file per corpo;
 //    - i corpi NON solidi (superfici aperte) diretti vengono esportati con
@@ -156,12 +232,15 @@
 //      noti dall'indice) e applica la stessa logica per ciascun componente,
 //      esportando ogni occorrenza separatamente se il componente e' usato
 //      piu' volte.
-// 5. Il progresso si vede in tempo reale nel pannello della finestra stessa
-//    (oltre che nella Listing Window di NX, che resta comunque aggiornata).
-//    Log dettagliato in "log_conversione.txt", errori in
-//    "errori_conversione.log", mappa step->componenti in
-//    "component_index.txt" (tutti dentro la cartella di output effettiva di
-//    questo run).
+// 5. Il progresso della conversione si vede nella Listing Window di NX e nel
+//    file di log, aggiornati riga per riga man mano che procede (nessun
+//    pannello grafico dedicato: la GUI esterna serve solo per configurazione,
+//    decisione e riepilogo finale). Per annullare a meta' batch, crea un file
+//    CANCEL.txt nella cartella di output: viene rilevato al file STEP
+//    successivo e cancellato automaticamente. Log dettagliato in
+//    "log_conversione.txt", errori in "errori_conversione.log", mappa
+//    step->componenti in "component_index.txt" (tutti dentro la cartella di
+//    output effettiva di questo run).
 // 6. Prova PRIMA su 2-3 file soli (includendo se possibile un assieme con un
 //    componente ripetuto piu' volte, una parte con piu' corpi solidi, e/o
 //    corpi multi-lump), poi lancia sul totale.
@@ -169,7 +248,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Windows.Forms;
 using NXOpen;
 using NXOpen.Assemblies;
@@ -194,678 +276,15 @@ internal class ScanSummary
     public List<ScanRow> Rows = new List<ScanRow>();
 }
 
-// ATTENZIONE - compatibilita': su alcune installazioni NX, QUALUNQUE
-// System.Windows.Forms.Form (indipendentemente dalle proprieta' impostate)
-// va in MissingMethodException nel momento in cui la finestra viene
-// effettivamente creata (Form.ShowDialog -> Form.CreateHandle ->
-// Form.UpdateWindowIcon -> System.Drawing.Icon..ctor), a causa di un
-// disallineamento tra le versioni di System.Windows.Forms e
-// System.Drawing.Common caricate dal processo NX. Main() prova prima a
-// mitigare la causa (vedi TryPreloadCompatibleSystemDrawing) e ad aprire
-// questa finestra; se anche cosi' dovesse fallire, il try/catch attorno
-// alla sua creazione in Main() lo rileva e ripiega automaticamente su un
-// flusso equivalente basato solo su MessageBox/FolderBrowserDialog
-// (RunFallbackFlow, piu' sotto), che sono dialoghi nativi di Windows e non
-// passano da Form.UpdateWindowIcon.
-
-// Finestra unica (tre schermate, mai chiusa e riaperta nel mezzo) che funge
-// da punto di ingresso del journal e da centro di controllo per l'intero
-// flusso: 1) configurazione delle cartelle (con opzioni avanzate opzionali)
-// e avvio della scansione; 2) SOLO SE la scansione trova davvero dei
-// conflitti da risolvere, il riepilogo dei risultati e la scelta di come
-// procedere (se non ci sono conflitti si passa direttamente al punto 3);
-// 3) avanzamento della conversione in tempo reale (barra di progresso, file
-// corrente, log live, bottone Annulla), che a fine conversione si trasforma
-// nel riepilogo finale con il bottone per aprire la cartella di output. La
-// finestra si chiude solo quando l'utente lo decide esplicitamente
-// (Interrompi prima di iniziare, oppure Chiudi dal riepilogo finale).
-public class LauncherForm : Form
-{
-    public string ResultInputFolder;
-    public string ResultOutputFolder;
-    public BatchDecision ChosenDecision = BatchDecision.Stop;
-
-    // true non appena StartConversion() ha avviato RunBatch (a prescindere
-    // dall'esito: completata, annullata o fallita): dice a Main() che la
-    // conversione e' gia' stata gestita per intero dentro questa finestra,
-    // quindi non deve rilanciarla dopo la chiusura del form.
-    public bool ConversionRan = false;
-
-    private readonly Session theSession;
-    private readonly ListingWindow lw;
-
-    private Panel panelConfig;
-    private TextBox txtInputFolder;
-    private TextBox txtOutputFolder;
-    private Button btnBrowseInput;
-    private Button btnBrowseOutput;
-    private CheckBox chkShowAdvanced;
-    private Panel panelAdvanced;
-    private NumericUpDown numChordalTol;
-    private NumericUpDown numAdjacencyTol;
-    private NumericUpDown numAngularTol;
-    private CheckBox chkExportNotClosed;
-    private Button btnScan;
-
-    private Panel panelResults;
-    private Label lblSummary;
-    private ListView lvResults;
-    private Button btnBack;
-    private Button btnStop;
-    private Button btnOverwrite;
-    private Button btnCopy;
-
-    private Panel panelProgress;
-    private Label lblProgressHeader;
-    private Label lblCurrentFile;
-    private ProgressBar progressBar;
-    private TextBox txtLog;
-    private Button btnCancel;
-    private Button btnOpenOutput;
-    private Button btnCloseSummary;
-    private string lastResultOutputFolder;
-
-    public LauncherForm(Session session, ListingWindow listingWindow, string initialInputFolder, string initialOutputFolder)
-    {
-        theSession = session;
-        lw = listingWindow;
-
-        // Ogni proprieta' "cosmetica" e' avvolta nel proprio try/catch
-        // (metodi TrySetXxx sotto): se una di queste lancia un'eccezione in
-        // questo ambiente, il costruttore prosegue comunque invece di
-        // fallire subito - resta comunque il try/catch piu' esterno in
-        // Main() a intercettare un fallimento piu' serio (es. in
-        // ShowDialog) e passare al fallback.
-        Text = "Conversione batch STEP -> STL";
-        Width = 720;
-        Height = 500;
-        TrySetShowIcon(false);
-        TrySetStartPosition(FormStartPosition.CenterScreen);
-        TrySetMinimizeBox(false);
-        TrySetMaximizeBox(false);
-        TrySetFormBorderStyle(FormBorderStyle.FixedDialog);
-
-        BuildConfigPanel(initialInputFolder, initialOutputFolder);
-        BuildResultsPanel();
-        BuildProgressPanel();
-
-        Controls.Add(panelProgress);
-        Controls.Add(panelResults);
-        Controls.Add(panelConfig);
-
-        ShowConfigScreen();
-    }
-
-    private void TrySetShowIcon(bool value)
-    {
-        try { ShowIcon = value; } catch (Exception) { }
-    }
-
-    private void TrySetStartPosition(FormStartPosition value)
-    {
-        try { StartPosition = value; } catch (Exception) { }
-    }
-
-    private void TrySetMinimizeBox(bool value)
-    {
-        try { MinimizeBox = value; } catch (Exception) { }
-    }
-
-    private void TrySetMaximizeBox(bool value)
-    {
-        try { MaximizeBox = value; } catch (Exception) { }
-    }
-
-    private void TrySetFormBorderStyle(FormBorderStyle value)
-    {
-        try { FormBorderStyle = value; } catch (Exception) { }
-    }
-
-    private void BuildConfigPanel(string initialInputFolder, string initialOutputFolder)
-    {
-        panelConfig = new Panel();
-        panelConfig.Dock = DockStyle.Fill;
-
-        Label lblTitle = new Label();
-        lblTitle.Text = "=== Conversione batch STEP -> STL ===";
-        lblTitle.SetBounds(20, 16, 660, 30);
-
-        Label lblIn = new Label();
-        lblIn.Text = "Cartella di input (file STEP):";
-        lblIn.SetBounds(20, 70, 660, 20);
-
-        txtInputFolder = new TextBox();
-        txtInputFolder.Text = initialInputFolder;
-        txtInputFolder.SetBounds(20, 92, 560, 24);
-
-        btnBrowseInput = new Button();
-        btnBrowseInput.Text = "Sfoglia...";
-        btnBrowseInput.SetBounds(590, 91, 90, 26);
-        btnBrowseInput.Click += BtnBrowseInput_Click;
-
-        Label lblOut = new Label();
-        lblOut.Text = "Cartella di output (file STL):";
-        lblOut.SetBounds(20, 132, 660, 20);
-
-        txtOutputFolder = new TextBox();
-        txtOutputFolder.Text = initialOutputFolder;
-        txtOutputFolder.SetBounds(20, 154, 560, 24);
-
-        btnBrowseOutput = new Button();
-        btnBrowseOutput.Text = "Sfoglia...";
-        btnBrowseOutput.SetBounds(590, 153, 90, 26);
-        btnBrowseOutput.Click += BtnBrowseOutput_Click;
-
-        Label lblInfo = new Label();
-        lblInfo.Text =
-            "La scansione confronta i file STEP nella cartella di input con gli STL gia' presenti\n" +
-            "nella cartella di output, senza aprire alcuna parte in NX e senza modificare nulla. Se\n" +
-            "non trova conflitti la conversione parte subito; altrimenti ti verra' chiesto come procedere.";
-        lblInfo.SetBounds(20, 196, 660, 54);
-
-        chkShowAdvanced = new CheckBox();
-        chkShowAdvanced.Text = "Mostra opzioni avanzate (tolleranze STL, superfici non chiuse)";
-        chkShowAdvanced.SetBounds(20, 260, 400, 22);
-        chkShowAdvanced.CheckedChanged += ChkShowAdvanced_CheckedChanged;
-
-        BuildAdvancedPanel();
-
-        btnScan = new Button();
-        btnScan.Text = "Avvia scansione";
-        btnScan.SetBounds(20, 400, 160, 32);
-        btnScan.Click += BtnScan_Click;
-
-        panelConfig.Controls.Add(lblTitle);
-        panelConfig.Controls.Add(lblIn);
-        panelConfig.Controls.Add(txtInputFolder);
-        panelConfig.Controls.Add(btnBrowseInput);
-        panelConfig.Controls.Add(lblOut);
-        panelConfig.Controls.Add(txtOutputFolder);
-        panelConfig.Controls.Add(btnBrowseOutput);
-        panelConfig.Controls.Add(lblInfo);
-        panelConfig.Controls.Add(chkShowAdvanced);
-        panelConfig.Controls.Add(panelAdvanced);
-        panelConfig.Controls.Add(btnScan);
-    }
-
-    // Sezione "Opzioni avanzate": nascosta di default (mostra/nasconde con
-    // chkShowAdvanced), permette di modificare per questa esecuzione le
-    // tolleranze STL e se esportare anche le superfici non chiuse, senza
-    // dover editare il file .cs. I valori iniziali sono quelli configurati
-    // di default in NXJournal.
-    private void BuildAdvancedPanel()
-    {
-        panelAdvanced = new Panel();
-        panelAdvanced.SetBounds(20, 286, 660, 106);
-        panelAdvanced.Visible = false;
-
-        Label lblChordal = new Label();
-        lblChordal.Text = "Tolleranza cordale (chordal):";
-        lblChordal.SetBounds(0, 2, 260, 20);
-
-        numChordalTol = new NumericUpDown();
-        numChordalTol.SetBounds(270, 0, 100, 22);
-        numChordalTol.Minimum = 0.0001m;
-        numChordalTol.Maximum = 10m;
-        numChordalTol.DecimalPlaces = 4;
-        numChordalTol.Increment = 0.0001m;
-        numChordalTol.Value = (decimal)NXJournal.chordalTol;
-
-        Label lblAdjacency = new Label();
-        lblAdjacency.Text = "Tolleranza di adiacenza (adjacency):";
-        lblAdjacency.SetBounds(0, 30, 260, 20);
-
-        numAdjacencyTol = new NumericUpDown();
-        numAdjacencyTol.SetBounds(270, 28, 100, 22);
-        numAdjacencyTol.Minimum = 0.01m;
-        numAdjacencyTol.Maximum = 50m;
-        numAdjacencyTol.DecimalPlaces = 2;
-        numAdjacencyTol.Increment = 0.01m;
-        numAdjacencyTol.Value = (decimal)NXJournal.adjacencyTol;
-
-        Label lblAngular = new Label();
-        lblAngular.Text = "Tolleranza angolare (gradi):";
-        lblAngular.SetBounds(0, 58, 260, 20);
-
-        numAngularTol = new NumericUpDown();
-        numAngularTol.SetBounds(270, 56, 100, 22);
-        numAngularTol.Minimum = 0.1m;
-        numAngularTol.Maximum = 90m;
-        numAngularTol.DecimalPlaces = 1;
-        numAngularTol.Increment = 0.5m;
-        numAngularTol.Value = (decimal)NXJournal.angularTol;
-
-        chkExportNotClosed = new CheckBox();
-        chkExportNotClosed.Text = "Esporta anche le superfici non chiuse (mesh aperte)";
-        chkExportNotClosed.SetBounds(400, 0, 260, 60);
-        chkExportNotClosed.Checked = NXJournal.exportNotClosedMeshes;
-
-        panelAdvanced.Controls.Add(lblChordal);
-        panelAdvanced.Controls.Add(numChordalTol);
-        panelAdvanced.Controls.Add(lblAdjacency);
-        panelAdvanced.Controls.Add(numAdjacencyTol);
-        panelAdvanced.Controls.Add(lblAngular);
-        panelAdvanced.Controls.Add(numAngularTol);
-        panelAdvanced.Controls.Add(chkExportNotClosed);
-    }
-
-    private void ChkShowAdvanced_CheckedChanged(object sender, EventArgs e)
-    {
-        panelAdvanced.Visible = chkShowAdvanced.Checked;
-    }
-
-    private void BuildResultsPanel()
-    {
-        panelResults = new Panel();
-        panelResults.Dock = DockStyle.Fill;
-
-        lblSummary = new Label();
-        lblSummary.SetBounds(20, 16, 660, 70);
-
-        lvResults = new ListView();
-        lvResults.View = System.Windows.Forms.View.Details;
-        lvResults.FullRowSelect = true;
-        lvResults.SetBounds(20, 96, 660, 270);
-        lvResults.Columns.Add("File STEP", 220);
-        lvResults.Columns.Add("Stato", 110);
-        lvResults.Columns.Add("Dettagli", 320);
-
-        btnBack = new Button();
-        btnBack.Text = "Torna indietro";
-        btnBack.SetBounds(20, 400, 130, 32);
-        btnBack.Click += BtnBack_Click;
-
-        btnStop = new Button();
-        btnStop.Text = "Interrompi";
-        btnStop.SetBounds(300, 400, 110, 32);
-        btnStop.Click += BtnStop_Click;
-
-        btnOverwrite = new Button();
-        btnOverwrite.Text = "Sovrascrivi";
-        btnOverwrite.SetBounds(420, 400, 110, 32);
-        btnOverwrite.Click += BtnOverwrite_Click;
-
-        btnCopy = new Button();
-        btnCopy.Text = "Copia in nuova cartella";
-        btnCopy.SetBounds(540, 400, 140, 32);
-        btnCopy.Click += BtnCopy_Click;
-
-        panelResults.Controls.Add(lblSummary);
-        panelResults.Controls.Add(lvResults);
-        panelResults.Controls.Add(btnBack);
-        panelResults.Controls.Add(btnStop);
-        panelResults.Controls.Add(btnOverwrite);
-        panelResults.Controls.Add(btnCopy);
-    }
-
-    private void BtnBrowseInput_Click(object sender, EventArgs e)
-    {
-        BrowseFolder(txtInputFolder);
-    }
-
-    private void BtnBrowseOutput_Click(object sender, EventArgs e)
-    {
-        BrowseFolder(txtOutputFolder);
-    }
-
-    private void BrowseFolder(TextBox target)
-    {
-        using (FolderBrowserDialog dlg = new FolderBrowserDialog())
-        {
-            if (Directory.Exists(target.Text))
-            {
-                dlg.SelectedPath = target.Text;
-            }
-            if (dlg.ShowDialog(this) == DialogResult.OK)
-            {
-                target.Text = dlg.SelectedPath;
-            }
-        }
-    }
-
-    // Avvia la scansione. Se NON ci sono conflitti, non ha senso chiedere
-    // Sovrascrivi/Copia (non c'e' nulla da sovrascrivere): la finestra si
-    // chiude subito e Main() procede direttamente con la conversione. Solo
-    // se ci sono conflitti reali si passa alla schermata dei risultati con
-    // la scelta a 3 vie.
-    private void BtnScan_Click(object sender, EventArgs e)
-    {
-        string inputFolderToScan = txtInputFolder.Text.Trim();
-        string outputFolderToScan = txtOutputFolder.Text.Trim();
-
-        if (!Directory.Exists(inputFolderToScan))
-        {
-            MessageBox.Show(this, "La cartella di input non esiste:\n" + inputFolderToScan,
-                "Cartella non trovata", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-
-        if (!Directory.Exists(outputFolderToScan))
-        {
-            try
-            {
-                Directory.CreateDirectory(outputFolderToScan);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, "Impossibile creare la cartella di output:\n" + ex.Message,
-                    "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
-        }
-
-        ScanSummary summary;
-        try
-        {
-            summary = NXJournal.PreScanConflicts(inputFolderToScan, outputFolderToScan);
-        }
-        catch (Exception ex)
-        {
-            MessageBox.Show(this, "Errore durante la scansione:\n" + ex.Message,
-                "Errore", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            return;
-        }
-
-        NXJournal.WriteScanSummaryFile(outputFolderToScan, summary);
-
-        ResultInputFolder = inputFolderToScan;
-        ResultOutputFolder = outputFolderToScan;
-
-        if (summary.ConflictCount == 0)
-        {
-            StartConversion(BatchDecision.Overwrite);
-            return;
-        }
-
-        PopulateResults(summary);
-        ShowResultsScreen();
-    }
-
-    private void PopulateResults(ScanSummary summary)
-    {
-        lblSummary.Text = string.Format(
-            "Trovati {0} conflitti su {1} file STEP (gli output corrispondenti esistono gia').\n" +
-            "Nota: le sorgenti che generano piu' di un file totale (corpi solidi + superfici aperte)\n" +
-            "verranno raggruppate in una sottocartella dedicata; le superfici aperte in una\n" +
-            "sotto-sottocartella \"{2}\".",
-            summary.ConflictCount, summary.TotalSteps, NXJournal.notClosedSubfolderName);
-
-        lvResults.Items.Clear();
-        foreach (ScanRow row in summary.Rows)
-        {
-            ListViewItem item = new ListViewItem(new string[] { row.StepBaseName, row.Status, row.Detail });
-            lvResults.Items.Add(item);
-        }
-    }
-
-    private void BtnBack_Click(object sender, EventArgs e)
-    {
-        ShowConfigScreen();
-    }
-
-    private void BtnStop_Click(object sender, EventArgs e)
-    {
-        ChosenDecision = BatchDecision.Stop;
-        DialogResult = DialogResult.OK;
-        Close();
-    }
-
-    private void BtnOverwrite_Click(object sender, EventArgs e)
-    {
-        StartConversion(BatchDecision.Overwrite);
-    }
-
-    private void BtnCopy_Click(object sender, EventArgs e)
-    {
-        StartConversion(BatchDecision.CopyToNewFolder);
-    }
-
-    // Avvia la conversione vera e propria SENZA chiudere la finestra: si
-    // passa al pannello di avanzamento (stessa finestra) e si chiama
-    // direttamente RunBatch, che nel frattempo aggiorna log/barra tramite i
-    // metodi AppendLogLine/SetProgress sotto. La finestra si chiude solo
-    // quando l'utente preme "Chiudi" nel riepilogo finale.
-    private void StartConversion(BatchDecision decision)
-    {
-        ChosenDecision = decision;
-        ResultInputFolder = txtInputFolder.Text.Trim();
-        ResultOutputFolder = txtOutputFolder.Text.Trim();
-
-        NXJournal.inputFolder = ResultInputFolder;
-        NXJournal.configuredOutputFolder = ResultOutputFolder;
-        NXJournal.ApplyAdvancedOptions(
-            (double)numChordalTol.Value, (double)numAdjacencyTol.Value,
-            (double)numAngularTol.Value, chkExportNotClosed.Checked);
-
-        txtLog.Clear();
-        progressBar.Value = 0;
-        lblProgressHeader.Text = "Conversione in corso...";
-        lblCurrentFile.Text = "Preparazione in corso...";
-        btnCancel.Enabled = true;
-        btnCancel.Text = "Annulla";
-        btnCancel.Visible = true;
-        btnOpenOutput.Visible = false;
-        btnCloseSummary.Visible = false;
-        ShowProgressScreen();
-        Application.DoEvents();
-
-        NXJournal.ActiveProgressForm = this;
-        NXJournal.CancelRequested = false;
-        ConversionRan = true;
-
-        NXJournal.BatchResult result;
-        try
-        {
-            result = NXJournal.RunBatch(theSession, lw, decision);
-        }
-        catch (Exception ex)
-        {
-            NXJournal.Log(lw, "ERRORE GENERALE (la conversione si e' fermata): " + ex.Message);
-            NXJournal.Log(lw, ex.StackTrace);
-            result = new NXJournal.BatchResult();
-            result.OutputFolder = NXJournal.outputFolder;
-            result.FatalError = ex.Message;
-        }
-        finally
-        {
-            NXJournal.ActiveProgressForm = null;
-        }
-
-        ShowSummary(result);
-    }
-
-    private void BtnCancel_Click(object sender, EventArgs e)
-    {
-        NXJournal.CancelRequested = true;
-        btnCancel.Enabled = false;
-        btnCancel.Text = "Annullamento in corso...";
-    }
-
-    private void BtnOpenOutput_Click(object sender, EventArgs e)
-    {
-        try
-        {
-            if (!string.IsNullOrEmpty(lastResultOutputFolder) && Directory.Exists(lastResultOutputFolder))
-            {
-                System.Diagnostics.Process.Start("explorer.exe", "\"" + lastResultOutputFolder + "\"");
-            }
-        }
-        catch (Exception)
-        {
-            // apertura della cartella puramente di comodo: se fallisce non blocchiamo nulla
-        }
-    }
-
-    private void BtnCloseSummary_Click(object sender, EventArgs e)
-    {
-        DialogResult = DialogResult.OK;
-        Close();
-    }
-
-    // Chiamato da NXJournal.Log() per ogni riga, se questa finestra e' il
-    // form di avanzamento attivo: tiene il log della GUI allineato in tempo
-    // reale a quello che va nella Listing Window/file di log.
-    internal void AppendLogLine(string message)
-    {
-        if (txtLog == null || txtLog.IsDisposed)
-        {
-            return;
-        }
-        txtLog.AppendText(message + Environment.NewLine);
-    }
-
-    // Chiamato da NXJournal.ReportProgress() a inizio di ogni file STEP.
-    internal void SetProgress(int current, int total, string label)
-    {
-        if (progressBar == null || progressBar.IsDisposed)
-        {
-            return;
-        }
-        if (total > 0)
-        {
-            progressBar.Maximum = total;
-            progressBar.Value = Math.Min(Math.Max(current, 0), total);
-        }
-        lblCurrentFile.Text = label;
-    }
-
-    private void ShowSummary(NXJournal.BatchResult result)
-    {
-        lastResultOutputFolder = result.OutputFolder;
-
-        string headline;
-        if (result.FatalError != null)
-        {
-            headline = "Conversione interrotta da un errore imprevisto: " + result.FatalError;
-        }
-        else if (result.Cancelled)
-        {
-            headline = string.Format(
-                "Annullato dall'utente: {0} file STEP completati su {1}, {2} file STL scritti.",
-                result.Ok + result.Failed, result.TotalSteps, result.GrandFiles);
-        }
-        else
-        {
-            headline = string.Format(
-                "Completato: {0} file STEP riusciti su {1}, {2} file STL scritti.",
-                result.Ok, result.TotalSteps, result.GrandFiles);
-            if (result.Failed > 0)
-            {
-                headline += string.Format(" ({0} file STEP falliti: vedi log errori.)", result.Failed);
-            }
-        }
-
-        lblProgressHeader.Text = headline;
-        lblCurrentFile.Text = "Cartella di output: " + result.OutputFolder;
-
-        btnCancel.Visible = false;
-        btnOpenOutput.Visible = true;
-        btnCloseSummary.Visible = true;
-    }
-
-    private void ShowConfigScreen()
-    {
-        panelResults.Visible = false;
-        panelProgress.Visible = false;
-        panelConfig.Visible = true;
-    }
-
-    private void ShowResultsScreen()
-    {
-        panelConfig.Visible = false;
-        panelProgress.Visible = false;
-        panelResults.Visible = true;
-    }
-
-    private void ShowProgressScreen()
-    {
-        panelConfig.Visible = false;
-        panelResults.Visible = false;
-        panelProgress.Visible = true;
-    }
-
-    // Costruisce il terzo pannello (avanzamento -> diventa riepilogo a fine
-    // conversione, vedi ShowSummary): barra di progresso, log testuale live
-    // (rispecchia la Listing Window/il file di log) e i pulsanti Annulla /
-    // Apri cartella di output / Chiudi (questi ultimi due nascosti finche'
-    // la conversione non e' finita).
-    private void BuildProgressPanel()
-    {
-        panelProgress = new Panel();
-        panelProgress.Dock = DockStyle.Fill;
-
-        lblProgressHeader = new Label();
-        lblProgressHeader.Text = "Conversione in corso...";
-        lblProgressHeader.SetBounds(20, 16, 660, 38);
-
-        lblCurrentFile = new Label();
-        lblCurrentFile.Text = "";
-        lblCurrentFile.SetBounds(20, 58, 660, 20);
-
-        progressBar = new ProgressBar();
-        progressBar.SetBounds(20, 82, 660, 22);
-        progressBar.Minimum = 0;
-        progressBar.Maximum = 100;
-        progressBar.Value = 0;
-
-        txtLog = new TextBox();
-        txtLog.SetBounds(20, 112, 660, 254);
-        txtLog.Multiline = true;
-        txtLog.ReadOnly = true;
-        txtLog.ScrollBars = ScrollBars.Vertical;
-        txtLog.WordWrap = false;
-
-        btnCancel = new Button();
-        btnCancel.Text = "Annulla";
-        btnCancel.SetBounds(20, 400, 110, 32);
-        btnCancel.Click += BtnCancel_Click;
-
-        btnOpenOutput = new Button();
-        btnOpenOutput.Text = "Apri cartella di output";
-        btnOpenOutput.SetBounds(430, 400, 150, 32);
-        btnOpenOutput.Click += BtnOpenOutput_Click;
-        btnOpenOutput.Visible = false;
-
-        btnCloseSummary = new Button();
-        btnCloseSummary.Text = "Chiudi";
-        btnCloseSummary.SetBounds(590, 400, 90, 32);
-        btnCloseSummary.Click += BtnCloseSummary_Click;
-        btnCloseSummary.Visible = false;
-
-        panelProgress.Controls.Add(lblProgressHeader);
-        panelProgress.Controls.Add(lblCurrentFile);
-        panelProgress.Controls.Add(progressBar);
-        panelProgress.Controls.Add(txtLog);
-        panelProgress.Controls.Add(btnCancel);
-        panelProgress.Controls.Add(btnOpenOutput);
-        panelProgress.Controls.Add(btnCloseSummary);
-    }
-
-    // Chiusura della finestra (es. [X], Alt+F4) senza aver premuto nessuno dei
-    // pulsanti di decisione equivale sempre a "Interrompi" (default sicuro),
-    // ma solo se la conversione non e' gia' partita (altrimenti manterrebbe
-    // comunque il risultato gia' prodotto: chiudere a conversione finita non
-    // deve "annullare" nulla).
-    protected override void OnFormClosing(FormClosingEventArgs e)
-    {
-        if (DialogResult != DialogResult.OK && !ConversionRan)
-        {
-            ChosenDecision = BatchDecision.Stop;
-        }
-        base.OnFormClosing(e);
-    }
-}
-
 public class NXJournal
 {
     // =========================================================================
     // CONFIGURAZIONE (valori di default: modificabili anche dalla GUI ad ogni
     // esecuzione, senza dover editare questo file)
     // =========================================================================
-    // internal (non piu' private): LauncherForm imposta questi campi con i
-    // valori scelti dall'utente subito prima di avviare RunBatch (vedi
-    // StartConversion), esattamente come faceva gia' Main() con il vecchio
-    // flusso a finestra "usa e getta".
+    // internal (non piu' private): RunExternalGuiFlow/RunFallbackFlow
+    // impostano questi campi con i valori scelti dall'utente subito prima di
+    // avviare RunBatch.
     internal static string inputFolder = @"C:\Users\AndreaScalenghe\Desktop\STEP_Convert";
 
     // Cartella di output COME CONFIGURATA dall'utente (default o valore
@@ -882,7 +301,7 @@ public class NXJournal
     internal static string outputFolder = configuredOutputFolder;
 
     // Tolleranze STL: valori di default, modificabili dal pannello "Opzioni
-    // avanzate" di LauncherForm (vedi ApplyAdvancedOptions) subito prima di
+    // avanzate" della GUI esterna (vedi ApplyAdvancedOptions) subito prima di
     // ogni esecuzione. Non piu' readonly per questo motivo.
     internal static double chordalTol   = 0.0025;
     internal static double adjacencyTol = 0.08;
@@ -897,8 +316,7 @@ public class NXJournal
     // Nome della sottocartella dove finiscono i corpi non chiusi: quando la
     // sorgente non e' raggruppata, e' direttamente dentro la cartella di
     // output; quando e' raggruppata (vedi ComputeExportFolders), e' annidata
-    // dentro la sottocartella dedicata alla sorgente. Accessibile anche da
-    // LauncherForm per il testo di riepilogo della scansione.
+    // dentro la sottocartella dedicata alla sorgente.
     internal static readonly string notClosedSubfolderName = "000_Not_Closed_Mesh";
 
     // Suffisso aggiunto al nome file dei corpi non chiusi, per riconoscerli subito
@@ -930,21 +348,31 @@ public class NXJournal
     // e a scrivere nella Listing Window, esattamente come prima.
     private static string logFilePath = null;
 
-    // Form di avanzamento attivo (se presente): quando non null, Log() vi
-    // rispecchia ogni riga in tempo reale e ReportProgress() ne aggiorna la
-    // barra di avanzamento. Impostato/azzerato da LauncherForm.StartConversion.
-    internal static LauncherForm ActiveProgressForm = null;
+    // StreamWriter tenuto aperto per tutta la durata del batch, cosi' che
+    // Log() non debba piu' aprire e richiudere il file ad ogni singola riga
+    // (File.AppendAllText apriva/chiudeva l'handle ad ogni chiamata: su
+    // centinaia di file, con diverse righe di log ciascuno, il solo overhead
+    // di apertura/chiusura - specialmente su cartelle di rete o con antivirus
+    // che intercetta ogni apertura file - poteva diventare un rallentamento
+    // misurabile). Il Flush() dopo ogni riga mantiene la stessa garanzia di
+    // "log leggibile anche in caso di crash" che si aveva prima, senza
+    // ripagare il costo di un open/close per riga.
+    private static StreamWriter logWriter = null;
 
-    // Flag cooperativo impostato dal bottone "Annulla" del pannello di
-    // avanzamento: controllato da RunBatch a inizio di ogni file STEP (mai a
-    // meta' esportazione), cosi' l'interruzione avviene sempre a un confine
-    // sicuro tra un file e il successivo.
-    internal static volatile bool CancelRequested = false;
+    // Cartella temporanea creata per lo scambio di file con il processo
+    // powershell.exe della GUI esterna (vedi RunExternalGuiFlow), e percorso
+    // dello script .ps1 scritto al suo interno. Restano valorizzati per
+    // tutta la durata del run cosi' da poter mostrare anche la finestra di
+    // riepilogo finale (TryShowExternalGuiSummary) con lo stesso script gia'
+    // scritto, e per poter ripulire tutto a fine esecuzione
+    // (CleanUpExternalGuiWorkDir). Null se la GUI esterna non e' mai partita.
+    private static string externalGuiWorkDir = null;
+    private static string externalGuiScriptPath = null;
 
     // Risultato di un'esecuzione di RunBatch: i conteggi erano gia' tutti
     // calcolati a fine metodo (variabili locali), qui vengono solo raccolti
-    // in un oggetto cosi' che LauncherForm possa mostrarli nel riepilogo
-    // finale invece che solo nella Listing Window.
+    // in un oggetto cosi' che si possa mostrarne un riepilogo (nella GUI
+    // esterna, se disponibile) invece che solo nella Listing Window.
     internal class BatchResult
     {
         public int TotalSteps;
@@ -973,87 +401,39 @@ public class NXJournal
         exportNotClosedMeshes = exportOpenBodies;
     }
 
-    // Chiamato da RunBatch a inizio di ogni file STEP: aggiorna la barra di
-    // avanzamento del form attivo, se presente. Avvolto in try/catch come
-    // tutte le altre interazioni con la GUI in questo file.
-    internal static void ReportProgress(int current, int total, string label)
-    {
-        if (ActiveProgressForm == null)
-        {
-            return;
-        }
-        try
-        {
-            ActiveProgressForm.SetProgress(current, total, label);
-        }
-        catch (Exception)
-        {
-            // un aggiornamento di progresso mancato non deve bloccare la conversione
-        }
-    }
-
     public static void Main(string[] args)
     {
         Session theSession = Session.GetSession();
         ListingWindow lw = theSession.ListingWindow;
         lw.Open();
 
-        Log(lw, "=== Avvio conversione batch STEP -> STL (v10) ===");
+        Log(lw, "=== Avvio conversione batch STEP -> STL (v14.2) ===");
 
-        TryPreloadCompatibleSystemDrawing();
-
-        // Percorso preferito: finestra grafica vera (LauncherForm), che ora
-        // gestisce l'INTERO flusso al suo interno (configurazione, eventuale
-        // risoluzione conflitti, avanzamento live e riepilogo finale) senza
-        // mai chiudersi e riaprirsi: la conversione vera e propria viene
-        // avviata direttamente da dentro la finestra (vedi
-        // LauncherForm.StartConversion), non piu' da qui dopo la sua
-        // chiusura. Se in questo ambiente NX qualunque Form crasha alla
-        // creazione (vedi commento sopra LauncherForm), il try/catch lo
-        // rileva e si passa automaticamente al fallback a soli
-        // MessageBox/FolderBrowserDialog (RunFallbackFlow) - in quel caso
-        // pero' non c'e' un pannello di avanzamento dedicato: e' il percorso
-        // di compatibilita' degradata, non l'esperienza primaria.
+        // Percorso preferito: GUI vera mostrata da un processo powershell.exe
+        // separato (vedi RunExternalGuiFlow) - configurazione cartelle,
+        // eventuale risoluzione conflitti, e (a fine conversione) riepilogo.
+        // Se PowerShell non fosse disponibile in questo ambiente per
+        // qualunque motivo, il try/catch lo rileva e si passa
+        // automaticamente al fallback a soli MessageBox/FolderBrowserDialog
+        // (RunFallbackFlow), con la stessa identica logica "chiedi solo se
+        // serve".
         BatchDecision decision = BatchDecision.Stop;
-        bool formUiSucceeded = false;
-        bool conversionHandledByForm = false;
+        bool externalGuiSucceeded = false;
         try
         {
-            using (LauncherForm launcher = new LauncherForm(theSession, lw, inputFolder, configuredOutputFolder))
-            {
-                launcher.ShowDialog();
-                decision = launcher.ChosenDecision;
-                conversionHandledByForm = launcher.ConversionRan;
-                if (!string.IsNullOrEmpty(launcher.ResultInputFolder))
-                {
-                    inputFolder = launcher.ResultInputFolder;
-                }
-                if (!string.IsNullOrEmpty(launcher.ResultOutputFolder))
-                {
-                    configuredOutputFolder = launcher.ResultOutputFolder;
-                }
-                formUiSucceeded = true;
-            }
+            decision = RunExternalGuiFlow(lw);
+            externalGuiSucceeded = true;
         }
         catch (Exception ex)
         {
             decision = BatchDecision.Stop;
-            Log(lw, "Interfaccia grafica avanzata non disponibile in questo ambiente NX (" +
+            Log(lw, "GUI esterna (PowerShell) non disponibile in questo ambiente (" +
                 ex.GetType().Name + ": " + ex.Message + "). Passo ai popup di sistema.");
         }
 
-        if (!formUiSucceeded)
+        if (!externalGuiSucceeded)
         {
             decision = RunFallbackFlow(lw);
-        }
-
-        if (conversionHandledByForm)
-        {
-            // La conversione e' gia' stata eseguita per intero dentro la
-            // finestra (compresi log incrementale e riepilogo): qui resta
-            // solo da scrivere la rete di sicurezza del log completo.
-            WriteFinalLogSafety();
-            return;
         }
 
         outputFolder = configuredOutputFolder;
@@ -1064,9 +444,10 @@ public class NXJournal
             return;
         }
 
+        BatchResult result = null;
         try
         {
-            RunBatch(theSession, lw, decision);
+            result = RunBatch(theSession, lw, decision);
         }
         catch (Exception ex)
         {
@@ -1077,38 +458,1034 @@ public class NXJournal
         {
             WriteFinalLogSafety();
         }
+
+        if (externalGuiSucceeded && result != null)
+        {
+            TryShowExternalGuiSummary(lw, result);
+        }
+
+        CleanUpExternalGuiWorkDir();
     }
 
-    // Tentativo best-effort di far usare al processo la versione di
-    // System.Drawing.Common che sta nella STESSA cartella di
-    // System.Windows.Forms.dll (le due vengono sempre distribuite insieme
-    // nello stesso "shared framework" .NET). Se NX ha gia' caricato una
-    // copia diversa/incompatibile PRIMA che questo journal partisse (causa
-    // nota del MissingMethodException su Form.UpdateWindowIcon), questo
-    // puo' non avere alcun effetto perche' l'identita' dell'assembly e' gia'
-    // stata risolta nel processo; ma se invece nessuno l'ha ancora caricata,
-    // forzare qui la versione "giusta" puo' evitare il problema alla radice.
-    // Avvolto in try/catch: se fallisce, non peggiora nulla rispetto a
-    // prima, e il try/catch attorno a LauncherForm in Main() gestisce
-    // comunque un eventuale fallimento residuo.
-    private static void TryPreloadCompatibleSystemDrawing()
+    // Script PowerShell della GUI esterna: un unico file con quattro "stage"
+    // (Config / Decision / Progress / Summary, scelti con il parametro -Stage),
+    // scritto su disco una volta per run e rilanciato in processi powershell.exe
+    // separati (vedi RunPowerShellStage e StartPowerShellProgressWindow). Ogni
+    // stage legge il proprio file di input e scrive il proprio file di output
+    // dentro -WorkDir, in un formato "chiave=valore" volutamente elementare
+    // (niente libreria JSON necessaria su nessuno dei due lati). Tutti i numeri
+    // sono sempre formattati/parsati con cultura invariante (punto come separatore
+    // decimale), per non dipendere dalle impostazioni regionali della
+    // macchina (es. virgola invece di punto con Windows in italiano).
+    private static readonly string ExternalGuiScriptSource =
+@"param(
+    [Parameter(Mandatory=$true)][string]$Stage,
+    [Parameter(Mandatory=$true)][string]$WorkDir
+)
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$ic = [System.Globalization.CultureInfo]::InvariantCulture
+
+# --- Palette e stile condivisi da tutte le finestre (look chiaro e piatto, stile ""Apple"") ---
+$ClrWindowBg   = [System.Drawing.Color]::FromArgb(246, 246, 248)
+$ClrCardBg     = [System.Drawing.Color]::White
+$ClrText       = [System.Drawing.Color]::FromArgb(29, 29, 31)
+$ClrSubtext    = [System.Drawing.Color]::FromArgb(110, 110, 115)
+$ClrBorder     = [System.Drawing.Color]::FromArgb(216, 216, 220)
+$ClrAccent     = [System.Drawing.Color]::FromArgb(0, 122, 255)
+$ClrAccentDark = [System.Drawing.Color]::FromArgb(0, 100, 220)
+$ClrTrack      = [System.Drawing.Color]::FromArgb(228, 228, 232)
+
+$FontBase   = New-Object System.Drawing.Font(""Segoe UI"", 9.5)
+$FontTitle  = New-Object System.Drawing.Font(""Segoe UI"", 13, [System.Drawing.FontStyle]::Bold)
+$FontSmall  = New-Object System.Drawing.Font(""Segoe UI"", 8.75)
+$FontButton = New-Object System.Drawing.Font(""Segoe UI"", 9.5, [System.Drawing.FontStyle]::Bold)
+
+# Regione con angoli arrotondati, usata per dare ai pulsanti, alle card e alla
+# barra di avanzamento un aspetto piu' morbido del rettangolo vivo di default
+# di WinForms.
+function New-RoundedRegion($w, $h, $r) {
+    $d = $r * 2
+    if ($d -gt $w) { $d = $w }
+    if ($d -gt $h) { $d = $h }
+    $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+    $path.AddArc(0, 0, $d, $d, 180, 90)
+    $path.AddArc($w - $d, 0, $d, $d, 270, 90)
+    $path.AddArc($w - $d, $h - $d, $d, $d, 0, 90)
+    $path.AddArc(0, $h - $d, $d, $d, 90, 90)
+    $path.CloseFigure()
+    return New-Object System.Drawing.Region($path)
+}
+
+function Style-Form($form) {
+    # AutoScaleMode di default (Font) fa si' che WinForms ridimensioni tutti
+    # i controlli DOPO che erano gia' stati posizionati/arrotondati con le
+    # coordinate assolute usate qui, su schermi con scaling DPI diverso dal
+    # 100%: il risultato e' un disallineamento fra i bordi dei pulsanti e la
+    # loro regione arrotondata (angoli poco arrotondati, bordino residuo).
+    # Disattivandolo i controlli restano esattamente alle coordinate/misure
+    # con cui sono stati creati.
+    $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
+    $form.BackColor = $ClrWindowBg
+    $form.Font = $FontBase
+}
+
+# Pannello decorativo bianco con angoli arrotondati, usato come sfondo ""a
+# scheda"" dietro a un gruppo di controlli gia' posizionati sul form (i
+# controlli restano figli diretti del form, alle loro coordinate originali:
+# la card viene solo disegnata dietro di essi, senza bisogno di ricalcolare
+# le coordinate di nulla). IMPORTANTE: SendToBack() va richiamato dal
+# chiamante DOPO aver aggiunto tutti i controlli che devono comparire sopra
+# la card - chiamarlo qui, subito dopo la creazione (quando la card e'
+# ancora l'unico controllo nella collezione), non ha alcun effetto duraturo:
+# i controlli aggiunti in seguito finiscono comunque sopra di essa in modo
+# imprevedibile.
+function Add-Card($form, $x, $y, $w, $h) {
+    $card = New-Object System.Windows.Forms.Panel
+    $card.SetBounds($x, $y, $w, $h)
+    $card.BackColor = $ClrCardBg
+    $card.Region = New-RoundedRegion $card.Width $card.Height 12
+    $form.Controls.Add($card)
+    return $card
+}
+
+function Style-TitleLabel($lbl) {
+    $lbl.Font = $FontTitle
+    $lbl.ForeColor = $ClrText
+    $lbl.BackColor = [System.Drawing.Color]::Transparent
+}
+
+function Style-Label($lbl) {
+    $lbl.Font = $FontBase
+    $lbl.ForeColor = $ClrText
+    $lbl.BackColor = [System.Drawing.Color]::Transparent
+}
+
+function Style-SubLabel($lbl) {
+    $lbl.Font = $FontSmall
+    $lbl.ForeColor = $ClrSubtext
+    $lbl.BackColor = [System.Drawing.Color]::Transparent
+}
+
+function Style-TextBox($txt) {
+    $txt.Font = $FontBase
+    $txt.BorderStyle = ""FixedSingle""
+    $txt.BackColor = $ClrCardBg
+    $txt.ForeColor = $ClrText
+}
+
+function Style-NumericUpDown($num) {
+    $num.Font = $FontBase
+    $num.BorderStyle = ""FixedSingle""
+    $num.BackColor = $ClrCardBg
+    $num.ForeColor = $ClrText
+}
+
+function Style-CheckBox($chk) {
+    $chk.Font = $FontBase
+    $chk.ForeColor = $ClrText
+    $chk.BackColor = [System.Drawing.Color]::Transparent
+}
+
+function Style-PrimaryButton($btn) {
+    $btn.FlatStyle = ""Flat""
+    $btn.FlatAppearance.BorderSize = 0
+    $btn.BackColor = $ClrAccent
+    $btn.ForeColor = [System.Drawing.Color]::White
+    $btn.Font = $FontButton
+    $btn.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btn.Region = New-RoundedRegion $btn.Width $btn.Height 8
+    $btn.Add_MouseEnter({ $this.BackColor = $ClrAccentDark })
+    $btn.Add_MouseLeave({ $this.BackColor = $ClrAccent })
+}
+
+function Style-SecondaryButton($btn) {
+    # Niente FlatAppearance.BorderSize: un bordo rettangolare disegnato sopra
+    # una regione arrotondata lascia un piccolo residuo agli angoli (il
+    # ""bordino"" visibile). Un riempimento pieno grigio chiaro invece del
+    # bianco+bordo evita del tutto il problema e resta leggibile come
+    # pulsante anche sopra le card bianche.
+    $btn.FlatStyle = ""Flat""
+    $btn.FlatAppearance.BorderSize = 0
+    $btn.BackColor = $ClrTrack
+    $btn.ForeColor = $ClrText
+    $btn.Font = $FontButton
+    $btn.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btn.Region = New-RoundedRegion $btn.Width $btn.Height 8
+    $btn.Add_MouseEnter({ $this.BackColor = $ClrBorder })
+    $btn.Add_MouseLeave({ $this.BackColor = $ClrTrack })
+}
+
+# Dissolvenza in apertura: il form parte invisibile (Opacity 0) e, non
+# appena viene mostrato, un timer lo porta a piena opacita' in pochi
+# passaggi. Puramente cosmetico: si ferma e si smonta da solo, non ha alcun
+# effetto sul contenuto o sul risultato del dialogo.
+function Enable-FadeIn($form) {
+    $form.Opacity = 0
+    $form.Add_Shown({
+        $fadeTimer = New-Object System.Windows.Forms.Timer
+        $fadeTimer.Interval = 15
+        $fadeTimer.Add_Tick({
+            $next = $form.Opacity + 0.15
+            if ($next -ge 1.0) {
+                $form.Opacity = 1.0
+                $fadeTimer.Stop()
+                $fadeTimer.Dispose()
+            } else {
+                $form.Opacity = $next
+            }
+        })
+        $fadeTimer.Start()
+    })
+}
+
+function Read-KeyValueFile($path) {
+    $result = @{}
+    if (Test-Path -LiteralPath $path) {
+        Get-Content -LiteralPath $path -Encoding UTF8 | ForEach-Object {
+            $line = $_
+            $idx = $line.IndexOf('=')
+            if ($idx -gt 0) {
+                $key = $line.Substring(0, $idx)
+                $val = $line.Substring($idx + 1)
+                $result[$key] = $val
+            }
+        }
+    }
+    return $result
+}
+
+function Write-KeyValueFile($path, $dict) {
+    $lines = @()
+    foreach ($k in $dict.Keys) { $lines += (""{0}={1}"" -f $k, $dict[$k]) }
+    Set-Content -LiteralPath $path -Value $lines -Encoding UTF8
+}
+
+function Parse-Double($text, $default) {
+    $val = 0.0
+    if ([double]::TryParse($text, [System.Globalization.NumberStyles]::Float, $ic, [ref]$val)) {
+        return $val
+    }
+    return $default
+}
+
+switch ($Stage) {
+    ""Config"" {
+        $inputFile = Join-Path $WorkDir ""config_input.txt""
+        $outputFile = Join-Path $WorkDir ""config_output.txt""
+        $cfg = Read-KeyValueFile $inputFile
+
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = ""Conversione batch STEP -> STL""
+        $form.Width = 720
+        $form.Height = 580
+        $form.StartPosition = ""CenterScreen""
+        $form.FormBorderStyle = ""FixedDialog""
+        $form.MinimizeBox = $false
+        $form.MaximizeBox = $false
+        $form.Topmost = $true
+        Style-Form $form
+        Enable-FadeIn $form
+
+        $lblTitle = New-Object System.Windows.Forms.Label
+        $lblTitle.Text = ""Conversione batch STEP -> STL""
+        $lblTitle.SetBounds(24, 20, 650, 30)
+        Style-TitleLabel $lblTitle
+        $form.Controls.Add($lblTitle)
+
+        $cardCartelle = Add-Card $form 14 66 620 178
+
+        $lblIn = New-Object System.Windows.Forms.Label
+        $lblIn.Text = ""Cartella di input (file STEP):""
+        $lblIn.SetBounds(24, 74, 580, 20)
+        Style-Label $lblIn
+        $form.Controls.Add($lblIn)
+
+        $txtIn = New-Object System.Windows.Forms.TextBox
+        $txtIn.SetBounds(24, 98, 500, 26)
+        $txtIn.Text = $cfg[""InputFolder""]
+        Style-TextBox $txtIn
+        $form.Controls.Add($txtIn)
+
+        $btnBrowseIn = New-Object System.Windows.Forms.Button
+        $btnBrowseIn.Text = ""Sfoglia""
+        $btnBrowseIn.SetBounds(536, 96, 88, 30)
+        $form.Controls.Add($btnBrowseIn)
+        Style-SecondaryButton $btnBrowseIn
+        $btnBrowseIn.Add_Click({
+            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+            if (Test-Path -LiteralPath $txtIn.Text) { $dlg.SelectedPath = $txtIn.Text }
+            if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtIn.Text = $dlg.SelectedPath }
+        })
+
+        $lblOut = New-Object System.Windows.Forms.Label
+        $lblOut.Text = ""Cartella di output (file STL):""
+        $lblOut.SetBounds(24, 138, 580, 20)
+        Style-Label $lblOut
+        $form.Controls.Add($lblOut)
+
+        $txtOut = New-Object System.Windows.Forms.TextBox
+        $txtOut.SetBounds(24, 162, 500, 26)
+        $txtOut.Text = $cfg[""OutputFolder""]
+        Style-TextBox $txtOut
+        $form.Controls.Add($txtOut)
+
+        $btnBrowseOut = New-Object System.Windows.Forms.Button
+        $btnBrowseOut.Text = ""Sfoglia""
+        $btnBrowseOut.SetBounds(536, 160, 88, 30)
+        $form.Controls.Add($btnBrowseOut)
+        Style-SecondaryButton $btnBrowseOut
+        $btnBrowseOut.Add_Click({
+            $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+            if (Test-Path -LiteralPath $txtOut.Text) { $dlg.SelectedPath = $txtOut.Text }
+            if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtOut.Text = $dlg.SelectedPath }
+        })
+
+        $lblInfo = New-Object System.Windows.Forms.Label
+        $lblInfo.Text = ""La scansione confronta i file STEP di input con gli STL gia' presenti in output, senza aprire NX. Se non trova conflitti la conversione parte subito.""
+        $lblInfo.SetBounds(24, 198, 600, 40)
+        Style-SubLabel $lblInfo
+        $form.Controls.Add($lblInfo)
+
+        $cardCartelle.SendToBack()
+
+        $chkAdvanced = New-Object System.Windows.Forms.CheckBox
+        $chkAdvanced.Text = ""Mostra opzioni avanzate (tolleranze STL, superfici non chiuse)""
+        $chkAdvanced.SetBounds(24, 254, 500, 24)
+        Style-CheckBox $chkAdvanced
+        $form.Controls.Add($chkAdvanced)
+
+        $panelAdv = New-Object System.Windows.Forms.Panel
+        $panelAdv.SetBounds(24, 284, 610, 140)
+        $panelAdv.Visible = $false
+        $panelAdv.BackColor = $ClrCardBg
+        $panelAdv.Region = New-RoundedRegion $panelAdv.Width $panelAdv.Height 12
+        $form.Controls.Add($panelAdv)
+
+        $lblChordal = New-Object System.Windows.Forms.Label
+        $lblChordal.Text = ""Tolleranza chordal:""
+        $lblChordal.SetBounds(14, 14, 160, 20)
+        Style-Label $lblChordal
+        $panelAdv.Controls.Add($lblChordal)
+
+        $numChordal = New-Object System.Windows.Forms.NumericUpDown
+        $numChordal.SetBounds(184, 12, 100, 24)
+        $numChordal.DecimalPlaces = 4
+        $numChordal.Increment = 0.0005
+        $numChordal.Minimum = 0.0001
+        $numChordal.Maximum = 10
+        $numChordal.Value = [decimal](Parse-Double $cfg[""ChordalTol""] 0.0025)
+        Style-NumericUpDown $numChordal
+        $panelAdv.Controls.Add($numChordal)
+
+        $lblAdj = New-Object System.Windows.Forms.Label
+        $lblAdj.Text = ""Tolleranza adjacency:""
+        $lblAdj.SetBounds(14, 46, 160, 20)
+        Style-Label $lblAdj
+        $panelAdv.Controls.Add($lblAdj)
+
+        $numAdj = New-Object System.Windows.Forms.NumericUpDown
+        $numAdj.SetBounds(184, 44, 100, 24)
+        $numAdj.DecimalPlaces = 3
+        $numAdj.Increment = 0.01
+        $numAdj.Minimum = 0.001
+        $numAdj.Maximum = 100
+        $numAdj.Value = [decimal](Parse-Double $cfg[""AdjacencyTol""] 0.08)
+        Style-NumericUpDown $numAdj
+        $panelAdv.Controls.Add($numAdj)
+
+        $lblAng = New-Object System.Windows.Forms.Label
+        $lblAng.Text = ""Tolleranza angular:""
+        $lblAng.SetBounds(14, 78, 160, 20)
+        Style-Label $lblAng
+        $panelAdv.Controls.Add($lblAng)
+
+        $numAng = New-Object System.Windows.Forms.NumericUpDown
+        $numAng.SetBounds(184, 76, 100, 24)
+        $numAng.DecimalPlaces = 1
+        $numAng.Increment = 0.5
+        $numAng.Minimum = 0.1
+        $numAng.Maximum = 90
+        $numAng.Value = [decimal](Parse-Double $cfg[""AngularTol""] 5.0)
+        Style-NumericUpDown $numAng
+        $panelAdv.Controls.Add($numAng)
+
+        $chkExportOpen = New-Object System.Windows.Forms.CheckBox
+        $chkExportOpen.Text = ""Esporta anche i corpi non chiusi (superfici aperte)""
+        $chkExportOpen.SetBounds(14, 108, 480, 22)
+        $chkExportOpen.Checked = ($cfg[""ExportNotClosed""] -ne ""0"")
+        Style-CheckBox $chkExportOpen
+        $panelAdv.Controls.Add($chkExportOpen)
+
+        $chkAdvanced.Add_CheckedChanged({ $panelAdv.Visible = $chkAdvanced.Checked })
+
+        $btnScan = New-Object System.Windows.Forms.Button
+        $btnScan.Text = ""Avvia scansione""
+        $btnScan.SetBounds(24, 456, 210, 44)
+        $btnScan.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $form.Controls.Add($btnScan)
+        Style-PrimaryButton $btnScan
+        $form.AcceptButton = $btnScan
+
+        $btnCancel = New-Object System.Windows.Forms.Button
+        $btnCancel.Text = ""Annulla""
+        $btnCancel.SetBounds(466, 456, 210, 44)
+        $btnCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $form.Controls.Add($btnCancel)
+        Style-SecondaryButton $btnCancel
+        $form.CancelButton = $btnCancel
+
+        # Senza questo, il primo campo di testo riceve il focus all'apertura
+        # e Windows ne seleziona automaticamente tutto il contenuto (il
+        # testo appare ""sempre evidenziato in blu""). Sposto solo il cursore
+        # a inizio testo, senza selezionare nulla.
+        $form.Add_Shown({ $txtIn.Select(0, 0) })
+
+        $result = $form.ShowDialog()
+
+        $out = @{}
+        if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
+            $out[""Cancelled""] = ""0""
+            $out[""InputFolder""] = $txtIn.Text
+            $out[""OutputFolder""] = $txtOut.Text
+            $out[""ChordalTol""] = $numChordal.Value.ToString($ic)
+            $out[""AdjacencyTol""] = $numAdj.Value.ToString($ic)
+            $out[""AngularTol""] = $numAng.Value.ToString($ic)
+            $out[""ExportNotClosed""] = if ($chkExportOpen.Checked) { ""1"" } else { ""0"" }
+        } else {
+            $out[""Cancelled""] = ""1""
+        }
+        Write-KeyValueFile $outputFile $out
+    }
+    ""Decision"" {
+        $inputFile = Join-Path $WorkDir ""decision_input.txt""
+        $outputFile = Join-Path $WorkDir ""decision_output.txt""
+        $summaryText = """"
+        if (Test-Path -LiteralPath $inputFile) {
+            $summaryText = [string]::Join([Environment]::NewLine, (Get-Content -LiteralPath $inputFile -Encoding UTF8))
+        }
+
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = ""Trovati conflitti - come procedere?""
+        $form.Width = 660
+        $form.Height = 520
+        $form.StartPosition = ""CenterScreen""
+        $form.FormBorderStyle = ""FixedDialog""
+        $form.MinimizeBox = $false
+        $form.MaximizeBox = $false
+        $form.Topmost = $true
+        Style-Form $form
+        Enable-FadeIn $form
+
+        $lblTitle = New-Object System.Windows.Forms.Label
+        $lblTitle.Text = ""Trovati conflitti - come procedere?""
+        $lblTitle.SetBounds(24, 20, 600, 30)
+        Style-TitleLabel $lblTitle
+        $form.Controls.Add($lblTitle)
+
+        $cardSummary = Add-Card $form 14 64 620 350
+
+        $txtSummary = New-Object System.Windows.Forms.TextBox
+        $txtSummary.Multiline = $true
+        $txtSummary.ReadOnly = $true
+        $txtSummary.TabStop = $false
+        $txtSummary.ScrollBars = ""Vertical""
+        $txtSummary.SetBounds(24, 74, 600, 330)
+        $txtSummary.Text = $summaryText
+        Style-TextBox $txtSummary
+        $form.Controls.Add($txtSummary)
+
+        $cardSummary.SendToBack()
+
+        $btnOverwrite = New-Object System.Windows.Forms.Button
+        $btnOverwrite.Text = ""Sovrascrivi""
+        $btnOverwrite.SetBounds(24, 424, 185, 42)
+        $form.Controls.Add($btnOverwrite)
+        Style-PrimaryButton $btnOverwrite
+
+        $btnCopy = New-Object System.Windows.Forms.Button
+        $btnCopy.Text = ""Copia in nuova cartella""
+        $btnCopy.SetBounds(222, 424, 205, 42)
+        $form.Controls.Add($btnCopy)
+        Style-SecondaryButton $btnCopy
+
+        $btnStop = New-Object System.Windows.Forms.Button
+        $btnStop.Text = ""Interrompi""
+        $btnStop.SetBounds(440, 424, 184, 42)
+        $form.Controls.Add($btnStop)
+        Style-SecondaryButton $btnStop
+
+        $script:decision = ""Stop""
+        $btnOverwrite.Add_Click({ $script:decision = ""Overwrite""; $form.Close() })
+        $btnCopy.Add_Click({ $script:decision = ""Copy""; $form.Close() })
+        $btnStop.Add_Click({ $script:decision = ""Stop""; $form.Close() })
+
+        [void]$form.ShowDialog()
+
+        Write-KeyValueFile $outputFile @{ ""Decision"" = $script:decision }
+    }
+    ""Progress"" {
+        $metaFile = Join-Path $WorkDir ""progress_meta.txt""
+        $statusFile = Join-Path $WorkDir ""progress_status.txt""
+        $meta = Read-KeyValueFile $metaFile
+        $outFolder = $meta[""OutputFolder""]
+        $totalInitial = 0
+        [int]::TryParse($meta[""Total""], [ref]$totalInitial) | Out-Null
+
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = ""Conversione in corso...""
+        $form.Width = 560
+        $form.Height = 270
+        $form.StartPosition = ""CenterScreen""
+        $form.FormBorderStyle = ""FixedDialog""
+        $form.MinimizeBox = $false
+        $form.MaximizeBox = $false
+        $form.Topmost = $true
+        Style-Form $form
+        Enable-FadeIn $form
+
+        $lblTitle = New-Object System.Windows.Forms.Label
+        $lblTitle.Text = ""Conversione STEP -> STL in corso""
+        $lblTitle.SetBounds(24, 20, 500, 30)
+        Style-TitleLabel $lblTitle
+        $form.Controls.Add($lblTitle)
+
+        $lblFile = New-Object System.Windows.Forms.Label
+        $lblFile.Text = ""Preparazione...""
+        $lblFile.SetBounds(24, 64, 500, 20)
+        $lblFile.AutoEllipsis = $true
+        Style-Label $lblFile
+        $form.Controls.Add($lblFile)
+
+        $pnlTrack = New-Object System.Windows.Forms.Panel
+        $pnlTrack.SetBounds(24, 96, 496, 14)
+        $pnlTrack.BackColor = $ClrTrack
+        $pnlTrack.Region = New-RoundedRegion $pnlTrack.Width $pnlTrack.Height 7
+        $form.Controls.Add($pnlTrack)
+
+        $pnlFill = New-Object System.Windows.Forms.Panel
+        $pnlFill.SetBounds(0, 0, 2, 14)
+        $pnlFill.BackColor = $ClrAccent
+        $pnlFill.Region = New-RoundedRegion 2 14 7
+        $pnlTrack.Controls.Add($pnlFill)
+
+        $lblCount = New-Object System.Windows.Forms.Label
+        $lblCount.Text = (""0 di {0} completati"" -f $totalInitial)
+        $lblCount.SetBounds(24, 120, 300, 20)
+        Style-SubLabel $lblCount
+        $form.Controls.Add($lblCount)
+
+        $lblStats = New-Object System.Windows.Forms.Label
+        $lblStats.Text = """"
+        $lblStats.SetBounds(24, 142, 496, 20)
+        Style-SubLabel $lblStats
+        $form.Controls.Add($lblStats)
+
+        $btnCancel = New-Object System.Windows.Forms.Button
+        $btnCancel.Text = ""Annulla""
+        $btnCancel.SetBounds(370, 178, 150, 40)
+        $form.Controls.Add($btnCancel)
+        Style-SecondaryButton $btnCancel
+
+        $script:cancelRequested = $false
+        $btnCancel.Add_Click({
+            $script:cancelRequested = $true
+            $btnCancel.Enabled = $false
+            $btnCancel.Text = ""Annullamento...""
+            if (-not [string]::IsNullOrEmpty($outFolder)) {
+                try {
+                    if (-not (Test-Path -LiteralPath $outFolder)) { New-Item -ItemType Directory -Path $outFolder -Force | Out-Null }
+                    Set-Content -LiteralPath (Join-Path $outFolder ""CANCEL.txt"") -Value ""cancel"" -Encoding UTF8
+                } catch {
+                }
+            }
+        })
+
+        # Due timer separati: uno ""lento"" (poll) legge il file di stato scritto
+        # dal batch e memorizza solo il target da raggiungere; uno ""veloce""
+        # (render) anima la barra avvicinandola gradualmente al target ad ogni
+        # tick, invece di farla scattare di colpo alla nuova percentuale. La
+        # chiusura della finestra avviene nel render timer, solo dopo che
+        # l'animazione ha raggiunto il target finale, cosi' l'utente vede
+        # sempre la barra arrivare visibilmente al 100% prima che si chiuda.
+        $script:targetWidth = 2
+        $script:doneReceived = $false
+
+        $pollTimer = New-Object System.Windows.Forms.Timer
+        $pollTimer.Interval = 300
+        $pollTimer.Add_Tick({
+            $st = Read-KeyValueFile $statusFile
+            if ($st.Count -eq 0) { return }
+
+            $cur = 0
+            $tot = $totalInitial
+            $okCount = 0
+            $failCount = 0
+            [int]::TryParse($st[""Current""], [ref]$cur) | Out-Null
+            [int]::TryParse($st[""Total""], [ref]$tot) | Out-Null
+            [int]::TryParse($st[""Ok""], [ref]$okCount) | Out-Null
+            [int]::TryParse($st[""Failed""], [ref]$failCount) | Out-Null
+            $fileName = $st[""FileName""]
+
+            $totForPct = $tot
+            if ($totForPct -le 0) { $totForPct = 1 }
+            $pct = [double]$cur / [double]$totForPct
+            if ($pct -lt 0) { $pct = 0 }
+            if ($pct -gt 1) { $pct = 1 }
+
+            $newTarget = [int]($pnlTrack.Width * $pct)
+            if ($newTarget -lt 2) { $newTarget = 2 }
+            if ($newTarget -gt $pnlTrack.Width) { $newTarget = $pnlTrack.Width }
+            $script:targetWidth = $newTarget
+
+            if ([string]::IsNullOrEmpty($fileName)) {
+                $lblFile.Text = ""Elaborazione in corso...""
+            } else {
+                $lblFile.Text = (""In elaborazione: {0}"" -f $fileName)
+            }
+            $lblCount.Text = (""{0} di {1} completati ({2}%)"" -f $cur, $tot, [int]($pct * 100))
+            $lblStats.Text = (""Riusciti: {0}    Falliti: {1}"" -f $okCount, $failCount)
+
+            if ($st[""Done""] -eq ""1"") {
+                $script:doneReceived = $true
+            }
+        })
+
+        $renderTimer = New-Object System.Windows.Forms.Timer
+        $renderTimer.Interval = 30
+        $renderTimer.Add_Tick({
+            $currentWidth = $pnlFill.Width
+            $delta = $script:targetWidth - $currentWidth
+            if ([Math]::Abs($delta) -gt 0) {
+                $step = [int]($delta * 0.3)
+                if ($step -eq 0) { $step = if ($delta -gt 0) { 1 } else { -1 } }
+                $newWidth = $currentWidth + $step
+                if ($newWidth -lt 2) { $newWidth = 2 }
+                if ($newWidth -gt $pnlTrack.Width) { $newWidth = $pnlTrack.Width }
+                $pnlFill.Width = $newWidth
+                $pnlFill.Region = New-RoundedRegion $newWidth $pnlFill.Height 7
+            }
+
+            if ($script:doneReceived -and $pnlFill.Width -ge $script:targetWidth) {
+                $pollTimer.Stop()
+                $renderTimer.Stop()
+                $form.Close()
+            }
+        })
+
+        $pollTimer.Start()
+        $renderTimer.Start()
+
+        [void]$form.ShowDialog()
+        $pollTimer.Stop()
+        $pollTimer.Dispose()
+        $renderTimer.Stop()
+        $renderTimer.Dispose()
+    }
+    ""Summary"" {
+        $inputFile = Join-Path $WorkDir ""summary_input.txt""
+        $metaFile = Join-Path $WorkDir ""summary_meta.txt""
+        $summaryText = """"
+        if (Test-Path -LiteralPath $inputFile) {
+            $summaryText = [string]::Join([Environment]::NewLine, (Get-Content -LiteralPath $inputFile -Encoding UTF8))
+        }
+        $meta = Read-KeyValueFile $metaFile
+        $outFolder = $meta[""OutputFolder""]
+
+        $form = New-Object System.Windows.Forms.Form
+        $form.Text = ""Conversione completata""
+        $form.Width = 620
+        $form.Height = 460
+        $form.StartPosition = ""CenterScreen""
+        $form.FormBorderStyle = ""FixedDialog""
+        $form.MinimizeBox = $false
+        $form.MaximizeBox = $false
+        $form.Topmost = $true
+        Style-Form $form
+        Enable-FadeIn $form
+
+        $lblTitle = New-Object System.Windows.Forms.Label
+        $lblTitle.Text = ""Conversione completata""
+        $lblTitle.SetBounds(24, 20, 560, 30)
+        Style-TitleLabel $lblTitle
+        $form.Controls.Add($lblTitle)
+
+        $cardFinal = Add-Card $form 14 64 580 300
+
+        $txt = New-Object System.Windows.Forms.TextBox
+        $txt.Multiline = $true
+        $txt.ReadOnly = $true
+        $txt.TabStop = $false
+        $txt.ScrollBars = ""Vertical""
+        $txt.SetBounds(24, 74, 560, 280)
+        $txt.Text = $summaryText
+        Style-TextBox $txt
+        $form.Controls.Add($txt)
+
+        $cardFinal.SendToBack()
+
+        $btnOpen = New-Object System.Windows.Forms.Button
+        $btnOpen.Text = ""Apri cartella di output""
+        $btnOpen.SetBounds(24, 368, 230, 42)
+        $form.Controls.Add($btnOpen)
+        Style-SecondaryButton $btnOpen
+        $btnOpen.Add_Click({
+            if (Test-Path -LiteralPath $outFolder) { Start-Process -FilePath ""explorer.exe"" -ArgumentList @($outFolder) }
+        })
+
+        $btnClose = New-Object System.Windows.Forms.Button
+        $btnClose.Text = ""Chiudi""
+        $btnClose.SetBounds(414, 368, 170, 42)
+        $form.Controls.Add($btnClose)
+        Style-PrimaryButton $btnClose
+        $btnClose.Add_Click({ $form.Close() })
+        $form.AcceptButton = $btnClose
+
+        [void]$form.ShowDialog()
+    }
+    default {
+        Write-Error (""Stage sconosciuto: "" + $Stage)
+        exit 1
+    }
+}
+";
+
+    // Percorso PRIMARIO: mostra la GUI vera lanciando powershell.exe come
+    // processo SEPARATO da quello di NX (vedi il changelog v12 in cima al
+    // file per il perche'). Gestisce, in ordine: schermata di configurazione
+    // (cartelle + opzioni avanzate), scansione preventiva, ed EVENTUALMENTE
+    // (solo se la scansione trova conflitti) la schermata di decisione.
+    // Qualunque eccezione qui dentro (powershell.exe non trovato, processo
+    // che non produce il file di output atteso, ecc.) risale a Main(), che
+    // la intercetta e passa al fallback - stessa logica di degradazione
+    // automatica e trasparente gia' in uso dalle versioni precedenti.
+    private static BatchDecision RunExternalGuiFlow(ListingWindow lw)
+    {
+        string workDir = CreateExternalGuiWorkDir();
+        string scriptPath = WriteExternalGuiScript(workDir);
+        externalGuiWorkDir = workDir;
+        externalGuiScriptPath = scriptPath;
+
+        Dictionary<string, string> configInput = new Dictionary<string, string>();
+        configInput["InputFolder"] = inputFolder;
+        configInput["OutputFolder"] = configuredOutputFolder;
+        configInput["ChordalTol"] = chordalTol.ToString(CultureInfo.InvariantCulture);
+        configInput["AdjacencyTol"] = adjacencyTol.ToString(CultureInfo.InvariantCulture);
+        configInput["AngularTol"] = angularTol.ToString(CultureInfo.InvariantCulture);
+        configInput["ExportNotClosed"] = exportNotClosedMeshes ? "1" : "0";
+        WriteKeyValueFile(Path.Combine(workDir, "config_input.txt"), configInput);
+
+        RunPowerShellStage(scriptPath, workDir, "Config");
+        Dictionary<string, string> configOutput = ReadKeyValueFile(Path.Combine(workDir, "config_output.txt"));
+
+        if (configOutput.Count == 0 || GetFlag(configOutput, "Cancelled"))
+        {
+            Log(lw, "Interrotto dall'utente durante la configurazione. Nessun file scritto.");
+            return BatchDecision.Stop;
+        }
+
+        string chosenInputFolder = GetOrDefault(configOutput, "InputFolder", inputFolder);
+        string chosenOutputFolder = GetOrDefault(configOutput, "OutputFolder", configuredOutputFolder);
+
+        if (!Directory.Exists(chosenInputFolder))
+        {
+            Log(lw, "ERRORE: cartella di input non trovata: " + chosenInputFolder);
+            return BatchDecision.Stop;
+        }
+        inputFolder = chosenInputFolder;
+        configuredOutputFolder = chosenOutputFolder;
+        EnsureDirectory(configuredOutputFolder);
+
+        ApplyAdvancedOptions(
+            ParseInvariantDouble(configOutput, "ChordalTol", chordalTol),
+            ParseInvariantDouble(configOutput, "AdjacencyTol", adjacencyTol),
+            ParseInvariantDouble(configOutput, "AngularTol", angularTol),
+            GetFlag(configOutput, "ExportNotClosed"));
+
+        ScanSummary summary = PreScanConflicts(inputFolder, configuredOutputFolder);
+        WriteScanSummaryFile(configuredOutputFolder, summary);
+
+        if (summary.ConflictCount == 0)
+        {
+            Log(lw, string.Format(
+                "Scansione: {0} file STEP, nessun conflitto rilevato. Procedo automaticamente, senza chiedere altro.",
+                summary.TotalSteps));
+            return BatchDecision.Overwrite;
+        }
+
+        File.WriteAllLines(Path.Combine(workDir, "decision_input.txt"), BuildScanSummaryLines(summary));
+
+        RunPowerShellStage(scriptPath, workDir, "Decision");
+        Dictionary<string, string> decisionOutput = ReadKeyValueFile(Path.Combine(workDir, "decision_output.txt"));
+        string decisionStr = GetOrDefault(decisionOutput, "Decision", "Stop");
+
+        if (decisionStr == "Overwrite")
+        {
+            return BatchDecision.Overwrite;
+        }
+        if (decisionStr == "Copy")
+        {
+            return BatchDecision.CopyToNewFolder;
+        }
+
+        Log(lw, "Interrotto dall'utente dopo la scansione preventiva. Nessun file scritto.");
+        return BatchDecision.Stop;
+    }
+
+    // Best-effort: mostra il riepilogo finale nella GUI esterna (testo +
+    // pulsante "Apri cartella di output"). Se qualcosa va storto qui la
+    // conversione e' comunque gia' completata e il suo esito e' gia' nel log
+    // e nella Listing Window: un fallimento in questo passo va solo loggato,
+    // non deve mai far sembrare fallita la conversione stessa.
+    private static void TryShowExternalGuiSummary(ListingWindow lw, BatchResult result)
+    {
+        if (string.IsNullOrEmpty(externalGuiWorkDir) || string.IsNullOrEmpty(externalGuiScriptPath))
+        {
+            return;
+        }
+        try
+        {
+            List<string> lines = new List<string>();
+            if (!string.IsNullOrEmpty(result.FatalError))
+            {
+                lines.Add("ERRORE GENERALE: " + result.FatalError);
+            }
+            else if (result.Cancelled)
+            {
+                lines.Add("Conversione ANNULLATA dall'utente a meta' batch.");
+            }
+            else
+            {
+                lines.Add("Conversione completata.");
+            }
+            lines.Add("");
+            lines.Add(string.Format("File STEP: {0} totali, {1} riusciti, {2} falliti.",
+                result.TotalSteps, result.Ok, result.Failed));
+            lines.Add(string.Format("Componenti da assiemi: {0} riusciti, {1} falliti.",
+                result.CompOk, result.CompFailed));
+            lines.Add(string.Format("File STL scritti: {0} ({1} corpi solidi, {2} corpi non chiusi).",
+                result.GrandFiles, result.GrandSolidBodies, result.GrandOpenBodies));
+            if (result.GrandSkippedFiles > 0)
+            {
+                lines.Add(string.Format("File saltati perche' gia' esistenti: {0}.", result.GrandSkippedFiles));
+            }
+            lines.Add("");
+            lines.Add("Cartella di output: " + result.OutputFolder);
+
+            File.WriteAllLines(Path.Combine(externalGuiWorkDir, "summary_input.txt"), lines.ToArray());
+
+            Dictionary<string, string> meta = new Dictionary<string, string>();
+            meta["OutputFolder"] = result.OutputFolder ?? "";
+            WriteKeyValueFile(Path.Combine(externalGuiWorkDir, "summary_meta.txt"), meta);
+
+            RunPowerShellStage(externalGuiScriptPath, externalGuiWorkDir, "Summary");
+        }
+        catch (Exception ex)
+        {
+            Log(lw, "Avviso: impossibile mostrare il riepilogo nella GUI esterna (" + ex.Message + ").");
+        }
+    }
+
+    private static List<string> BuildScanSummaryLines(ScanSummary summary)
+    {
+        List<string> lines = new List<string>();
+        lines.Add(string.Format(
+            "Trovati {0} file STEP: {1} nuovi, {2} senza conflitti noti, {3} con conflitti rilevati.",
+            summary.TotalSteps, summary.NewCount, summary.NoConflictCount, summary.ConflictCount));
+        lines.Add("");
+        lines.Add("File con output gia' esistente:");
+        foreach (ScanRow row in summary.Rows)
+        {
+            if (row.Status == "CONFLITTO")
+            {
+                lines.Add("- " + row.StepBaseName + (string.IsNullOrEmpty(row.Detail) ? "" : " - " + row.Detail));
+            }
+        }
+        lines.Add("");
+        lines.Add("Elenco completo anche in ultima_scansione.txt, nella cartella di output.");
+        lines.Add("");
+        lines.Add("Nota: le sorgenti che generano piu' di un file totale (corpi solidi + superfici");
+        lines.Add("aperte) verranno raggruppate automaticamente in una sottocartella dedicata.");
+        return lines;
+    }
+
+    // Crea una cartella temporanea unica per questo run, sotto la cartella
+    // temp dell'utente corrente (Path.GetTempPath, sempre scrivibile senza
+    // diritti di amministratore). Un GUID nel nome evita collisioni tra run
+    // concorrenti o file residui di un run precedente.
+    private static string CreateExternalGuiWorkDir()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "nx_batch_stl_gui_" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        return dir;
+    }
+
+    private static string WriteExternalGuiScript(string workDir)
+    {
+        string scriptPath = Path.Combine(workDir, "nx_batch_gui.ps1");
+        File.WriteAllText(scriptPath, ExternalGuiScriptSource, new UTF8Encoding(false));
+        return scriptPath;
+    }
+
+    // Lancia powershell.exe in attesa SINCRONA (WaitForExit): NXOpen non e'
+    // thread-safe, quindi il journal deve comunque bloccarsi finche' l'utente
+    // non ha finito con la finestra, esattamente come avrebbe fatto
+    // Form.ShowDialog(). -WindowStyle Hidden + CreateNoWindow nascondono la
+    // console di PowerShell (che qui non serve, e' solo un launcher): la
+    // finestra WinForms creata dallo script rimane comunque visibile
+    // normalmente, non essendo legata alla visibilita' della console.
+    // -ExecutionPolicy Bypass vale solo per QUESTO singolo processo (non
+    // cambia alcuna policy di sistema/utente) e non richiede diritti di
+    // amministratore.
+    private static void RunPowerShellStage(string scriptPath, string workDir, string stage)
+    {
+        string expectedOutputFile = null;
+        if (stage == "Config")
+        {
+            expectedOutputFile = Path.Combine(workDir, "config_output.txt");
+        }
+        else if (stage == "Decision")
+        {
+            expectedOutputFile = Path.Combine(workDir, "decision_output.txt");
+        }
+
+        ProcessStartInfo psi = new ProcessStartInfo();
+        psi.FileName = "powershell.exe";
+        psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" +
+            scriptPath + "\" -Stage " + stage + " -WorkDir \"" + workDir + "\"";
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+
+        using (Process process = Process.Start(psi))
+        {
+            process.WaitForExit();
+        }
+
+        if (expectedOutputFile != null && !File.Exists(expectedOutputFile))
+        {
+            throw new Exception("La GUI esterna non ha prodotto il file di risposta atteso per lo stage " + stage + ".");
+        }
+    }
+
+    // Avvia lo stage "Progress" della GUI esterna come processo powershell.exe
+    // SEPARATO, ma - a differenza di RunPowerShellStage - senza attendere che
+    // termini (niente WaitForExit): il batch deve continuare a girare e ad
+    // aggiornare periodicamente il file di stato (vedi WriteProgressStatus)
+    // mentre la finestra resta aperta. La finestra si chiude da sola quando
+    // vi legge Done=1 nel file di stato.
+    private static Process StartPowerShellProgressWindow(string scriptPath, string workDir)
+    {
+        ProcessStartInfo psi = new ProcessStartInfo();
+        psi.FileName = "powershell.exe";
+        psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"" +
+            scriptPath + "\" -Stage Progress -WorkDir \"" + workDir + "\"";
+        psi.UseShellExecute = false;
+        psi.CreateNoWindow = true;
+        return Process.Start(psi);
+    }
+
+    // Scrive lo stato di avanzamento corrente nel formato chiave=valore che lo
+    // stage "Progress" della GUI esterna legge periodicamente (vedi il timer
+    // nello script PowerShell). Best-effort: un fallimento qui (es. file
+    // temporaneamente bloccato) non deve mai interrompere la conversione,
+    // che e' la parte che conta davvero.
+    private static void WriteProgressStatus(string path, int current, int total, string fileName, int ok, int failed, bool done)
     {
         try
         {
-            string wfDir = Path.GetDirectoryName(typeof(Form).Assembly.Location);
-            if (string.IsNullOrEmpty(wfDir))
+            Dictionary<string, string> status = new Dictionary<string, string>();
+            status["Current"] = current.ToString(CultureInfo.InvariantCulture);
+            status["Total"] = total.ToString(CultureInfo.InvariantCulture);
+            status["FileName"] = fileName ?? "";
+            status["Ok"] = ok.ToString(CultureInfo.InvariantCulture);
+            status["Failed"] = failed.ToString(CultureInfo.InvariantCulture);
+            status["Done"] = done ? "1" : "0";
+            WriteKeyValueFile(path, status);
+        }
+        catch (Exception)
+        {
+            // aggiornamento di avanzamento best-effort: un fallimento qui non deve fermare la conversione
+        }
+    }
+
+    private static void WriteKeyValueFile(string path, Dictionary<string, string> data)
+    {
+        List<string> lines = new List<string>();
+        foreach (KeyValuePair<string, string> kv in data)
+        {
+            lines.Add(kv.Key + "=" + kv.Value);
+        }
+        File.WriteAllLines(path, lines.ToArray(), new UTF8Encoding(false));
+    }
+
+    private static Dictionary<string, string> ReadKeyValueFile(string path)
+    {
+        Dictionary<string, string> result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (!File.Exists(path))
+        {
+            return result;
+        }
+        foreach (string rawLine in File.ReadAllLines(path))
+        {
+            int idx = rawLine.IndexOf('=');
+            if (idx > 0)
             {
-                return;
+                result[rawLine.Substring(0, idx)] = rawLine.Substring(idx + 1);
             }
-            string drawingPath = Path.Combine(wfDir, "System.Drawing.Common.dll");
-            if (File.Exists(drawingPath))
+        }
+        return result;
+    }
+
+    private static string GetOrDefault(Dictionary<string, string> data, string key, string defaultValue)
+    {
+        string val;
+        if (data.TryGetValue(key, out val) && !string.IsNullOrEmpty(val))
+        {
+            return val;
+        }
+        return defaultValue;
+    }
+
+    private static bool GetFlag(Dictionary<string, string> data, string key)
+    {
+        string val;
+        return data.TryGetValue(key, out val) && val == "1";
+    }
+
+    private static double ParseInvariantDouble(Dictionary<string, string> data, string key, double defaultValue)
+    {
+        string val;
+        double parsed;
+        if (data.TryGetValue(key, out val) &&
+            double.TryParse(val, NumberStyles.Float, CultureInfo.InvariantCulture, out parsed))
+        {
+            return parsed;
+        }
+        return defaultValue;
+    }
+
+    // Elimina la cartella temporanea di lavoro della GUI esterna a fine
+    // esecuzione (script .ps1 e file di scambio inclusi). Best-effort: se
+    // fallisce (es. antivirus che tiene un lock momentaneo) non e' un
+    // problema, e' solo pulizia di file temporanei.
+    private static void CleanUpExternalGuiWorkDir()
+    {
+        if (string.IsNullOrEmpty(externalGuiWorkDir))
+        {
+            return;
+        }
+        try
+        {
+            if (Directory.Exists(externalGuiWorkDir))
             {
-                System.Reflection.Assembly.LoadFrom(drawingPath);
+                Directory.Delete(externalGuiWorkDir, true);
             }
         }
         catch (Exception)
         {
-            // best-effort: se non funziona, il fallback in Main() gestisce comunque il crash
+            // pulizia best-effort: file temporanei residui non sono un problema funzionale
         }
     }
 
@@ -1118,9 +1495,9 @@ public class NXJournal
         WriteFinalLogSafety();
     }
 
-    // Percorso di riserva, usato SOLO se LauncherForm non e' utilizzabile in
-    // questo ambiente NX. Stessa logica "chiedi solo se serve" della
-    // finestra grafica: un solo selettore di cartella per input e uno per
+    // Percorso di riserva, usato SOLO se la GUI esterna (PowerShell) non e'
+    // utilizzabile in questo ambiente. Stessa logica "chiedi solo se serve"
+    // della GUI vera: un solo selettore di cartella per input e uno per
     // output (nessuna domanda superflua "usare questa cartella?" - la
     // cartella di default e' gia' preselezionata nel selettore stesso), poi
     // la scansione, e infine UNA sola domanda finale - e solo se la
@@ -1173,6 +1550,7 @@ public class NXJournal
             Log(lw, string.Format(
                 "Scansione: {0} file STEP, nessun conflitto rilevato. Procedo automaticamente, senza chiedere altro.",
                 summary.TotalSteps));
+            AskExportNotClosedToggle(lw);
             return BatchDecision.Overwrite;
         }
 
@@ -1189,7 +1567,24 @@ public class NXJournal
             return BatchDecision.Stop;
         }
 
-        return (modeResult == DialogResult.Yes) ? BatchDecision.Overwrite : BatchDecision.CopyToNewFolder;
+        BatchDecision chosenDecision = (modeResult == DialogResult.Yes) ? BatchDecision.Overwrite : BatchDecision.CopyToNewFolder;
+        AskExportNotClosedToggle(lw);
+        return chosenDecision;
+    }
+
+    // Unica opzione avanzata raggiungibile dal fallback: il solo toggle
+    // booleano per l'export dei corpi non chiusi. Le tolleranze numeriche
+    // restano ai valori di default in questo percorso (opzione di nicchia,
+    // per non introdurre componenti UI aggiuntivi non testati su questa
+    // installazione, come Microsoft.VisualBasic.InputBox).
+    private static void AskExportNotClosedToggle(ListingWindow lw)
+    {
+        DialogResult result = MessageBox.Show(
+            "Esportare anche i corpi non chiusi (mesh aperte) in una sottocartella dedicata?\n\n" +
+            "Si' = esporta (default)\nNo = salta i corpi non chiusi",
+            "Corpi non chiusi", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        exportNotClosedMeshes = (result == DialogResult.Yes);
+        Log(lw, "Export corpi non chiusi: " + (exportNotClosedMeshes ? "attivo" : "disattivato"));
     }
 
     // Selettore di cartella diretto: nessuna domanda preliminare "usare
@@ -1307,6 +1702,15 @@ public class NXJournal
     // incrementale che avviene durante il batch dentro RunBatch.
     private static void WriteFinalLogSafety()
     {
+        if (logWriter != null)
+        {
+            try { logWriter.Flush(); }
+            catch (Exception) { /* la riscrittura completa qui sotto e' comunque la rete di sicurezza */ }
+            try { logWriter.Dispose(); }
+            catch (Exception) { /* handle gia' invalido: nulla da fare */ }
+            logWriter = null;
+        }
+
         try
         {
             string logDir = Directory.Exists(outputFolder) ? outputFolder : @"C:\Users\AndreaScalenghe\Desktop";
@@ -1349,13 +1753,19 @@ public class NXJournal
         logFilePath = Path.Combine(outputFolder, "log_conversione.txt");
         try
         {
-            File.WriteAllLines(logFilePath, logLines.ToArray());
+            logWriter = new StreamWriter(logFilePath, false, new UTF8Encoding(false));
+            foreach (string existingLine in logLines)
+            {
+                logWriter.WriteLine(existingLine);
+            }
+            logWriter.Flush();
         }
         catch (Exception)
         {
-            // se non riusciamo nemmeno ad azzerarlo, la scrittura incrementale
-            // fallira' silenziosamente riga per riga; resta comunque la
-            // scrittura finale di sicurezza in WriteFinalLogSafety().
+            // se non riusciamo nemmeno ad aprirlo, Log() ripiega da sola su
+            // File.AppendAllText riga per riga; resta comunque la scrittura
+            // finale di sicurezza in WriteFinalLogSafety().
+            logWriter = null;
         }
 
         if (decision == BatchDecision.CopyToNewFolder)
@@ -1382,6 +1792,13 @@ public class NXJournal
 
         Log(lw, string.Format("Trovati {0} file STEP da convertire in: {1}", stepFiles.Count, inputFolder));
         Log(lw, string.Format("Output STL in: {0}", outputFolder));
+
+        // Meccanismo di annullamento cooperativo, valido indipendentemente da
+        // quale GUI ha avviato il run: creando un file marker con questo nome
+        // nella cartella di output (es. da Esplora risorse) durante
+        // l'esecuzione, il batch si ferma pulito al file STEP successivo.
+        string cancelMarkerPath = Path.Combine(outputFolder, "CANCEL.txt");
+        Log(lw, "Per annullare durante l'esecuzione, crea un file di nome CANCEL.txt in: " + outputFolder);
         Log(lw, "");
 
         // Contatori file STEP (esportati come singolo STL con corpi diretti,
@@ -1407,19 +1824,60 @@ public class NXJournal
 
         bool cancelled = false;
 
+        // Finestra di avanzamento con barra di progresso "live": mostrata solo
+        // se la GUI esterna (PowerShell) e' quella in uso per questo run (vedi
+        // RunExternalGuiFlow). E' un processo powershell.exe SEPARATO, avviato
+        // qui in modo NON bloccante (a differenza di RunPowerShellStage), che
+        // legge periodicamente il file di stato scritto ad ogni file STEP
+        // processato (vedi WriteProgressStatus) e chiude da solo la finestra
+        // quando vi legge Done=1. Qualunque problema nell'avviarla e' non
+        // fatale: la conversione procede comunque, semplicemente senza la
+        // finestra di avanzamento.
+        bool showProgressWindow = !string.IsNullOrEmpty(externalGuiWorkDir)
+            && !string.IsNullOrEmpty(externalGuiScriptPath)
+            && stepFiles.Count > 0;
+        string progressStatusPath = null;
+        Process progressProcess = null;
+        if (showProgressWindow)
+        {
+            try
+            {
+                progressStatusPath = Path.Combine(externalGuiWorkDir, "progress_status.txt");
+                Dictionary<string, string> progressMeta = new Dictionary<string, string>();
+                progressMeta["OutputFolder"] = outputFolder;
+                progressMeta["Total"] = stepFiles.Count.ToString(CultureInfo.InvariantCulture);
+                WriteKeyValueFile(Path.Combine(externalGuiWorkDir, "progress_meta.txt"), progressMeta);
+                WriteProgressStatus(progressStatusPath, 0, stepFiles.Count, "", 0, 0, false);
+                progressProcess = StartPowerShellProgressWindow(externalGuiScriptPath, externalGuiWorkDir);
+            }
+            catch (Exception)
+            {
+                showProgressWindow = false;
+                progressProcess = null;
+            }
+        }
+
+        try
+        {
         for (int i = 0; i < stepFiles.Count; i++)
         {
-            if (CancelRequested)
+            if (showProgressWindow)
+            {
+                WriteProgressStatus(progressStatusPath, i, stepFiles.Count, Path.GetFileNameWithoutExtension(stepFiles[i]), ok, failed, false);
+            }
+
+            if (File.Exists(cancelMarkerPath))
             {
                 cancelled = true;
                 Log(lw, "");
                 Log(lw, string.Format("Annullato dall'utente: interrotto dopo {0} di {1} file STEP.", i, stepFiles.Count));
+                try { if (File.Exists(cancelMarkerPath)) File.Delete(cancelMarkerPath); }
+                catch (Exception) { /* marker gia' rimosso o non cancellabile: non blocca l'interruzione */ }
                 break;
             }
 
             string stepFile = stepFiles[i];
             string baseName = Path.GetFileNameWithoutExtension(stepFile);
-            ReportProgress(i + 1, stepFiles.Count, string.Format("File {0}/{1}: {2}", i + 1, stepFiles.Count, baseName));
             Log(lw, string.Format("[{0}/{1}] {2}", i + 1, stepFiles.Count, baseName));
 
             // Controllo indice: se questo step e' gia' stato processato come assieme
@@ -1650,6 +2108,19 @@ public class NXJournal
 
             Log(lw, "");
         }
+        }
+        finally
+        {
+            if (showProgressWindow)
+            {
+                WriteProgressStatus(progressStatusPath, ok + failed, stepFiles.Count, "", ok, failed, true);
+                if (progressProcess != null)
+                {
+                    try { progressProcess.WaitForExit(4000); }
+                    catch (Exception) { /* best-effort: la pulizia finale non dipende da questo */ }
+                }
+            }
+        }
 
         Log(lw, "");
         Log(lw, "=====================================================");
@@ -1669,8 +2140,6 @@ public class NXJournal
             Log(lw, "");
             Log(lw, "Dettagli errori in: " + errLogPath);
         }
-
-        ReportProgress(stepFiles.Count, stepFiles.Count, cancelled ? "Annullato dall'utente." : "Conversione completata.");
 
         BatchResult result = new BatchResult();
         result.TotalSteps = stepFiles.Count;
@@ -2497,8 +2966,6 @@ public class NXJournal
         }
     }
 
-    // internal (non piu' private): LauncherForm.StartConversion la chiama
-    // direttamente in caso di eccezione fatale durante RunBatch.
     internal static void Log(ListingWindow lw, string message)
     {
         logLines.Add(message);
@@ -2521,7 +2988,15 @@ public class NXJournal
         {
             try
             {
-                File.AppendAllText(logFilePath, message + Environment.NewLine);
+                if (logWriter != null)
+                {
+                    logWriter.WriteLine(message);
+                    logWriter.Flush();
+                }
+                else
+                {
+                    File.AppendAllText(logFilePath, message + Environment.NewLine);
+                }
             }
             catch (Exception)
             {
@@ -2530,24 +3005,6 @@ public class NXJournal
             }
         }
 
-        // Rispecchia la riga anche nel pannello di avanzamento della GUI, se
-        // presente, e lascia respirare la finestra (ridisegno, click su
-        // "Annulla") durante il loop sincrono di RunBatch - NXOpen non e'
-        // thread-safe, quindi non si puo' usare un thread separato per la
-        // conversione: Application.DoEvents() e' il modo con cui il resto di
-        // questo file gia' mantiene la GUI reattiva senza multithreading.
-        if (ActiveProgressForm != null)
-        {
-            try
-            {
-                ActiveProgressForm.AppendLogLine(message);
-                Application.DoEvents();
-            }
-            catch (Exception)
-            {
-                // un aggiornamento di log mancato non deve bloccare la conversione
-            }
-        }
     }
 
     public static int GetUnloadOption(string dummy)
