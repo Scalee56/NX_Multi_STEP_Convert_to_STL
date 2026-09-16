@@ -180,8 +180,9 @@
 //   finally anche in caso di errore.
 // - FIX: log scritto in modo incrementale (append riga per riga) invece che
 //   solo a fine esecuzione.
-// - MIGLIORATA: CleanUpFacetedFacesAndEdges() chiamata una sola volta per
-//   gruppo di corpi esportati, non per ogni singolo corpo.
+// - La pulizia forzata delle faccette, presente nelle versioni precedenti, e'
+//   stata poi rimossa: prima della chiusura della parte poteva aggiungere una
+//   lunga pausa senza essere necessaria alla produzione degli STL.
 //
 // COSA ERA GIA' PRESENTE IN v7:
 // - NUOVO: se lo stesso componente compare piu' volte nell'assieme (es. 4 viti
@@ -372,6 +373,7 @@ public class NXJournal
     // true = la decisione "Sovrascrivi" scelta dall'utente nella GUI e' attiva
     // per il run corrente (impostato una volta all'inizio di RunBatch).
     private static bool allowOverwrite = false;
+    private static string activeCancelMarkerPath = null;
 
     // Percorsi assoluti gia' scritti in QUESTO run: usato per non sovrascrivere
     // mai silenziosamente un file appena prodotto da questo stesso batch,
@@ -1144,17 +1146,21 @@ $pnlProgress.Controls.Add($btnCancelProgress)
 Style-SecondaryButton $btnCancelProgress
 
 $script:cancelRequested = $false
-$btnCancelProgress.Add_Click({
+function Request-ProgressCancel {
+    if ($script:cancelRequested) { return }
     $script:cancelRequested = $true
-    $btnCancelProgress.Enabled = $false
-    $btnCancelProgress.Text = ""Annullamento...""
     if (-not [string]::IsNullOrEmpty($script:progressOutFolder)) {
         try {
             if (-not (Test-Path -LiteralPath $script:progressOutFolder)) { New-Item -ItemType Directory -Path $script:progressOutFolder -Force | Out-Null }
             Set-Content -LiteralPath (Join-Path $script:progressOutFolder ""CANCEL.txt"") -Value ""cancel"" -Encoding UTF8
-        } catch {
-        }
+        } catch {}
     }
+}
+$btnCancelProgress.Add_Click({
+    Request-ProgressCancel
+    $btnCancelProgress.Enabled = $false
+    $btnCancelProgress.Text = ""Annullamento...""
+    $form.Close()
 })
 
 # Due timer separati: uno ""lento"" (poll) legge il file di stato scritto
@@ -1385,7 +1391,7 @@ $orchTimer.Add_Tick({
         if (-not [string]::IsNullOrEmpty($finalLogPath) -and (Test-Path -LiteralPath $finalLogPath)) {
             $completeLog = [string]::Join([Environment]::NewLine, (Get-Content -LiteralPath $finalLogPath -Encoding UTF8))
             if (-not [string]::IsNullOrEmpty($completeLog)) {
-                $summaryText2 += [Environment]::NewLine + [Environment]::NewLine + ""--- LOG COMPLETO ---"" + [Environment]::NewLine + $completeLog
+                $summaryText2 = $completeLog
             }
         }
         $txtFinal.Text = $summaryText2
@@ -1420,6 +1426,11 @@ Enable-FadeIn $form
 # testo appare ""sempre evidenziato in blu""). Sposto solo il cursore
 # a inizio testo, senza selezionare nulla.
 $form.Add_Shown({ $txtIn.Select(0, 0) })
+$form.Add_FormClosing({
+    if ($pnlProgress.Visible -and -not $script:doneReceived) {
+        Request-ProgressCancel
+    }
+})
 
 [void]$form.ShowDialog()
 
@@ -2227,6 +2238,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         // nella cartella di output (es. da Esplora risorse) durante
         // l'esecuzione, il batch si ferma pulito al file STEP successivo.
         string cancelMarkerPath = Path.Combine(outputFolder, "CANCEL.txt");
+        activeCancelMarkerPath = cancelMarkerPath;
         Log(lw, "Per annullare durante l'esecuzione, crea un file di nome CANCEL.txt in: " + outputFolder);
         Log(lw, "");
 
@@ -2532,6 +2544,14 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                         exportedHere, failedHere));
                 }
             }
+            catch (OperationCanceledException)
+            {
+                cancelled = true;
+                Log(lw, "  -> ANNULLATO dall'utente.");
+                try { if (File.Exists(cancelMarkerPath)) File.Delete(cancelMarkerPath); }
+                catch (Exception) { }
+                break;
+            }
             catch (Exception ex)
             {
                 failed++;
@@ -2545,11 +2565,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 // prima di passare al file successivo.
                 // NXOpen.BasePart.CloseModified e' un enum ANNIDATO dentro BasePart (non uno
                 // standalone "BasePartCloseModified" - quello era l'errore nella v1).
-                try { theSession.CleanUpFacetedFacesAndEdges(); }
-                catch (Exception exCleanup)
-                {
-                    Log(lw, "  -> Avviso: errore durante la pulizia delle faccette: " + exCleanup.Message);
-                }
                 try { theSession.Parts.CloseAll(NXOpen.BasePart.CloseModified.CloseModified, null); }
                 catch (Exception exClose)
                 {
@@ -3064,6 +3079,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
         catch (Exception ex)
         {
+            if (ex is OperationCanceledException)
+            {
+                throw;
+            }
             compFailed++;
             File.AppendAllText(errLogPath,
                 string.Format("{0} - componente {1} (occorrenza {2}/{3}) - {4}{5}",
@@ -3175,6 +3194,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
         catch (Exception ex)
         {
+            if (ex is OperationCanceledException)
+            {
+                throw;
+            }
             compFailed++;
             File.AppendAllText(errLogPath,
                 string.Format("{0} - componente (prt diretto) {1} - {2}{3}", DateTime.Now, fileBaseName, ex.Message, Environment.NewLine));
@@ -3182,8 +3205,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
         finally
         {
-            try { theSession.CleanUpFacetedFacesAndEdges(); }
-            catch (Exception) { /* best-effort: la chiusura va comunque tentata */ }
             try { theSession.Parts.CloseAll(NXOpen.BasePart.CloseModified.CloseModified, null); }
             catch (Exception)
             {
@@ -3304,8 +3325,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     // Restituisce la lista dei percorsi file EFFETTIVAMENTE scritti (esclusi
     // quelli saltati).
     //
-    // La pulizia delle faccette viene eseguita dal chiamante una sola volta per
-    // parte, subito prima della chiusura, non una volta per corpo o gruppo.
+    // Non forza CleanUpFacetedFacesAndEdges: la parte viene chiusa dal chiamante
+    // e la pulizia aggiungeva una lunga pausa dopo l'ultimo export.
     private static List<string> ExportBodiesSeparately(Session theSession, ListingWindow lw, List<Body> bodies,
         string outputFolder, string baseFileName, ref int skippedCount)
     {
@@ -3318,6 +3339,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
         if (bodies.Count == 1)
         {
+            ThrowIfCancellationRequested();
             string outFile = Path.Combine(outputFolder, baseFileName + ".stl");
             if (!TryReserveOutputFile(lw, outFile, ref skippedCount))
             {
@@ -3330,6 +3352,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
         for (int i = 0; i < bodies.Count; i++)
         {
+            ThrowIfCancellationRequested();
             string outFile = Path.Combine(outputFolder, string.Format("{0}_corpo{1:00}.stl", baseFileName, i + 1));
             if (!TryReserveOutputFile(lw, outFile, ref skippedCount))
             {
@@ -3340,6 +3363,14 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
 
         return outputFiles;
+    }
+
+    private static void ThrowIfCancellationRequested()
+    {
+        if (!string.IsNullOrEmpty(activeCancelMarkerPath) && File.Exists(activeCancelMarkerPath))
+        {
+            throw new OperationCanceledException("Conversione annullata dall'utente.");
+        }
     }
 
     // Decide se un file di output puo' essere scritto in "outFile":
