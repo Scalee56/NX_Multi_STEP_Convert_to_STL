@@ -98,6 +98,8 @@ If a file or component fails, it doesn't block the rest of the batch: the error 
 - Previously indexed component `.prt` files are not reopened by default: the journal imports the original STEP once, avoiding one NX open/close cycle per indexed occurrence.
 - The final window directly shows `log_conversione.txt`, already positioned at the last lines. Once the log is visible the NX journal is allowed to finish immediately; the independent summary window remains open until you close it.
 - Clicking **Annulla** or closing the GUI during conversion writes the cancellation marker and closes the GUI. Cancellation is cooperative and is checked between STL bodies/components, so an NX `Commit()` already in progress is allowed to finish safely before the journal stops.
+- The standard minimize button minimizes both the progress GUI and the NX main window; restoring the GUI restores NX too.
+- The final-summary transition stops all progress timers before showing the completed log, preventing the waiting spinner from covering an already completed result.
 - The incremental log is buffered and flushed at the end of each STEP instead of after every line. When incremental logging succeeds, the finalization step closes the stream without rewriting the complete log.
 - If writing the log to file also fails (e.g. the output folder isn't writable), the script doesn't stop: it falls back to writing the log to the Desktop.
 - The component index (`component_index.txt`) is append-only and never deduplicated: each line represents one occurrence of a component in an assembly, so repeated components keep their correct quantity across runs. In "Copia in nuova cartella" mode, the new folder starts with its own empty index — it does not inherit the original folder's history.

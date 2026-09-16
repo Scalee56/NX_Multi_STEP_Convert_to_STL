@@ -373,6 +373,7 @@ public class NXJournal
     // per il run corrente (impostato una volta all'inizio di RunBatch).
     private static bool allowOverwrite = false;
     private static string activeCancelMarkerPath = null;
+    private static string activeGuiCancelMarkerPath = null;
 
     // Percorsi assoluti gia' scritti in QUESTO run: usato per non sovrascrivere
     // mai silenziosamente un file appena prodotto da questo stesso batch,
@@ -757,14 +758,41 @@ function Center-Form($targetForm, $w, $h) {
 
 $form = New-Object System.Windows.Forms.Form
 $form.StartPosition = ""Manual""
-$form.FormBorderStyle = ""FixedDialog""
-$form.MinimizeBox = $false
+$form.FormBorderStyle = ""FixedSingle""
+$form.MinimizeBox = $true
 $form.MaximizeBox = $false
 $form.Topmost = $true
 Style-Form $form
 
 $configInputFile = Join-Path $WorkDir ""config_input.txt""
 $cfg = Read-KeyValueFile $configInputFile
+
+# Il pulsante standard di riduzione a icona minimizza insieme la GUI e la
+# finestra principale NX, poi le ripristina insieme.
+Add-Type @""
+using System;
+using System.Runtime.InteropServices;
+public static class NxWindowControl {
+    [DllImport(""user32.dll"")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+}
+""@
+$script:nxProcessId = 0
+[int]::TryParse($cfg[""NxProcessId""], [ref]$script:nxProcessId) | Out-Null
+$script:minimizedNxWithGui = $false
+$form.Add_Resize({
+    if ($script:nxProcessId -le 0) { return }
+    try {
+        $nxProcess = Get-Process -Id $script:nxProcessId -ErrorAction Stop
+        if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+            [NxWindowControl]::ShowWindowAsync($nxProcess.MainWindowHandle, 6) | Out-Null
+            $script:minimizedNxWithGui = $true
+        } elseif ($script:minimizedNxWithGui -and $form.WindowState -eq [System.Windows.Forms.FormWindowState]::Normal) {
+            [NxWindowControl]::ShowWindowAsync($nxProcess.MainWindowHandle, 9) | Out-Null
+            $script:minimizedNxWithGui = $false
+        }
+    } catch {}
+})
 
 # --- Pannello Config --------------------------------------------------------
 $pnlConfig = New-Object System.Windows.Forms.Panel
@@ -1136,6 +1164,9 @@ function Request-ProgressCancel {
             Set-Content -LiteralPath (Join-Path $script:progressOutFolder ""CANCEL.txt"") -Value ""cancel"" -Encoding UTF8
         } catch {}
     }
+    try {
+        Set-Content -LiteralPath (Join-Path $WorkDir ""cancel_request.txt"") -Value ""cancel"" -Encoding UTF8
+    } catch {}
 }
 $btnCancelProgress.Add_Click({
     Request-ProgressCancel
@@ -1153,6 +1184,7 @@ $btnCancelProgress.Add_Click({
 # del riepilogo finale, che il journal C# scrivera' a breve.
 $script:targetWidth = 2
 $script:doneReceived = $false
+$script:summaryDisplayed = $false
 $script:previewLastWrite = [DateTime]::MinValue
 $script:progressTotalInitial = 0
 $script:progressStatusFile = """"
@@ -1239,7 +1271,7 @@ $progressRenderTimer.Add_Tick({
         $pnlFill.Region = New-RoundedRegion $newWidth $pnlFill.Height 7
     }
 
-    if ($script:doneReceived -and $pnlFill.Width -ge $script:targetWidth) {
+    if ($script:doneReceived -and -not $script:summaryDisplayed -and $pnlFill.Width -ge $script:targetWidth) {
         $progressPollTimer.Stop()
         $progressRenderTimer.Stop()
         $progressSpinnerTimer.Stop()
@@ -1342,6 +1374,7 @@ $orchTimer.Add_Tick({
         $script:progressStartTime = Get-Date
         $script:targetWidth = 2
         $script:doneReceived = $false
+        $script:summaryDisplayed = $false
         $script:cancelRequested = $false
         $btnCancelProgress.Enabled = $true
         $btnCancelProgress.Text = ""Annulla""
@@ -1361,6 +1394,16 @@ $orchTimer.Add_Tick({
         $progressSpinnerTimer.Start()
     }
     elseif ($stageName -eq ""Summary"") {
+        # Il comando Summary puo' arrivare prima che l'animazione abbia gestito
+        # Done=1. Ferma subito tutti i timer per evitare che il render timer
+        # rimetta la GUI su ""Preparazione del riepilogo..."" dopo aver gia'
+        # mostrato il log finale.
+        $script:summaryDisplayed = $true
+        $script:doneReceived = $true
+        $progressPollTimer.Stop()
+        $progressRenderTimer.Stop()
+        $progressSpinnerTimer.Stop()
+        if ($picPreview.Image) { $picPreview.Image.Dispose(); $picPreview.Image = $null }
         $summaryInputFile = Join-Path $WorkDir ""summary_input.txt""
         $summaryText2 = """"
         if (Test-Path -LiteralPath $summaryInputFile) {
@@ -1450,6 +1493,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         Dictionary<string, string> configInput = new Dictionary<string, string>();
         configInput["InputFolder"] = inputFolder;
         configInput["OutputFolder"] = configuredOutputFolder;
+        configInput["NxProcessId"] = Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture);
         configInput["ChordalTol"] = chordalTol.ToString(CultureInfo.InvariantCulture);
         configInput["AngularTol"] = angularTol.ToString(CultureInfo.InvariantCulture);
         configInput["ExportNotClosed"] = exportNotClosedMeshes ? "1" : "0";
@@ -2218,6 +2262,9 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         // l'esecuzione, il batch si ferma pulito al file STEP successivo.
         string cancelMarkerPath = Path.Combine(outputFolder, "CANCEL.txt");
         activeCancelMarkerPath = cancelMarkerPath;
+        activeGuiCancelMarkerPath = string.IsNullOrEmpty(externalGuiWorkDir)
+            ? null
+            : Path.Combine(externalGuiWorkDir, "cancel_request.txt");
         Log(lw, "Per annullare durante l'esecuzione, crea un file di nome CANCEL.txt in: " + outputFolder);
         Log(lw, "");
 
@@ -2286,13 +2333,14 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 WriteProgressStatus(progressStatusPath, i, stepFiles.Count, Path.GetFileNameWithoutExtension(stepFiles[i]), ok, failed, false);
             }
 
-            if (File.Exists(cancelMarkerPath))
+            if (IsCancellationRequested())
             {
                 cancelled = true;
                 Log(lw, "");
                 Log(lw, string.Format("Annullato dall'utente: interrotto dopo {0} di {1} file STEP.", i, stepFiles.Count));
                 try { if (File.Exists(cancelMarkerPath)) File.Delete(cancelMarkerPath); }
                 catch (Exception) { /* marker gia' rimosso o non cancellabile: non blocca l'interruzione */ }
+                DeleteGuiCancelMarker();
                 break;
             }
 
@@ -2529,6 +2577,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 Log(lw, "  -> ANNULLATO dall'utente.");
                 try { if (File.Exists(cancelMarkerPath)) File.Delete(cancelMarkerPath); }
                 catch (Exception) { }
+                DeleteGuiCancelMarker();
                 break;
             }
             catch (Exception ex)
@@ -3346,10 +3395,28 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
     private static void ThrowIfCancellationRequested()
     {
-        if (!string.IsNullOrEmpty(activeCancelMarkerPath) && File.Exists(activeCancelMarkerPath))
+        if (IsCancellationRequested())
         {
             throw new OperationCanceledException("Conversione annullata dall'utente.");
         }
+    }
+
+    private static bool IsCancellationRequested()
+    {
+        return (!string.IsNullOrEmpty(activeCancelMarkerPath) && File.Exists(activeCancelMarkerPath)) ||
+            (!string.IsNullOrEmpty(activeGuiCancelMarkerPath) && File.Exists(activeGuiCancelMarkerPath));
+    }
+
+    private static void DeleteGuiCancelMarker()
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(activeGuiCancelMarkerPath) && File.Exists(activeGuiCancelMarkerPath))
+            {
+                File.Delete(activeGuiCancelMarkerPath);
+            }
+        }
+        catch (Exception) { }
     }
 
     // Decide se un file di output puo' essere scritto in "outFile":
