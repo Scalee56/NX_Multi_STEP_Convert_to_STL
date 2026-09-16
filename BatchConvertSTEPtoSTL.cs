@@ -122,8 +122,8 @@
 //   il riepilogo (quanti file riusciti/falliti, quanti STL scritti) con un
 //   bottone per aprire direttamente la cartella di output.
 // - NUOVO: pannello "Opzioni avanzate" (nascosto di default) nella schermata
-//   di configurazione, per modificare le tolleranze STL (chordal, adjacency,
-//   angular) e se esportare anche le superfici non chiuse direttamente dalla
+//   di configurazione, per modificare le tolleranze STL visibili nel comando
+//   NX (chordal e angular) e se esportare anche le superfici non chiuse dalla
 //   GUI, senza piu' dover editare questo file per il caso comune di voler
 //   cambiare questi valori per una singola esecuzione.
 // - Rimangono finestre separate (MessageBox/FolderBrowserDialog) solo per le
@@ -332,7 +332,6 @@ public class NXJournal
     // avanzate" della GUI esterna (vedi ApplyAdvancedOptions) subito prima di
     // ogni esecuzione. Non piu' readonly per questo motivo.
     internal static double chordalTol   = 0.0025;
-    internal static double adjacencyTol = 0.08;
     internal static double angularTol   = 5.0;
 
     // true  = esporta anche i corpi NON solidi (superfici aperte/sheet) in una
@@ -442,10 +441,9 @@ public class NXJournal
     // Applica le opzioni scelte nel pannello "Opzioni avanzate" della GUI
     // (o i valori di default, se il pannello non e' mai stato aperto) prima
     // di avviare una conversione.
-    internal static void ApplyAdvancedOptions(double chordal, double adjacency, double angular, bool exportOpenBodies)
+    internal static void ApplyAdvancedOptions(double chordal, double angular, bool exportOpenBodies)
     {
         chordalTol = chordal;
-        adjacencyTol = adjacency;
         angularTol = angular;
         exportNotClosedMeshes = exportOpenBodies;
     }
@@ -865,30 +863,14 @@ $numChordal.Value = [decimal](Parse-Double $cfg[""ChordalTol""] 0.0025)
 Style-NumericUpDown $numChordal
 $panelAdv.Controls.Add($numChordal)
 
-$lblAdj = New-Object System.Windows.Forms.Label
-$lblAdj.Text = ""Tolleranza adjacency:""
-$lblAdj.SetBounds(14, 46, 160, 20)
-Style-Label $lblAdj
-$panelAdv.Controls.Add($lblAdj)
-
-$numAdj = New-Object System.Windows.Forms.NumericUpDown
-$numAdj.SetBounds(184, 44, 100, 24)
-$numAdj.DecimalPlaces = 3
-$numAdj.Increment = 0.01
-$numAdj.Minimum = 0.001
-$numAdj.Maximum = 100
-$numAdj.Value = [decimal](Parse-Double $cfg[""AdjacencyTol""] 0.08)
-Style-NumericUpDown $numAdj
-$panelAdv.Controls.Add($numAdj)
-
 $lblAng = New-Object System.Windows.Forms.Label
 $lblAng.Text = ""Tolleranza angular:""
-$lblAng.SetBounds(14, 78, 160, 20)
+$lblAng.SetBounds(14, 46, 160, 20)
 Style-Label $lblAng
 $panelAdv.Controls.Add($lblAng)
 
 $numAng = New-Object System.Windows.Forms.NumericUpDown
-$numAng.SetBounds(184, 76, 100, 24)
+$numAng.SetBounds(184, 44, 100, 24)
 $numAng.DecimalPlaces = 1
 $numAng.Increment = 0.5
 $numAng.Minimum = 0.1
@@ -899,7 +881,7 @@ $panelAdv.Controls.Add($numAng)
 
 $chkExportOpen = New-Object System.Windows.Forms.CheckBox
 $chkExportOpen.Text = ""Esporta anche i corpi non chiusi (superfici aperte)""
-$chkExportOpen.SetBounds(14, 108, 480, 22)
+$chkExportOpen.SetBounds(14, 78, 480, 22)
 $chkExportOpen.Checked = ($cfg[""ExportNotClosed""] -ne ""0"")
 Style-CheckBox $chkExportOpen
 $panelAdv.Controls.Add($chkExportOpen)
@@ -980,7 +962,6 @@ $btnScanConfig.Add_Click({
     $out[""InputFolder""] = $txtIn.Text
     $out[""OutputFolder""] = $txtOut.Text
     $out[""ChordalTol""] = $numChordal.Value.ToString($ic)
-    $out[""AdjacencyTol""] = $numAdj.Value.ToString($ic)
     $out[""AngularTol""] = $numAng.Value.ToString($ic)
     $out[""ExportNotClosed""] = if ($chkExportOpen.Checked) { ""1"" } else { ""0"" }
     Write-KeyValueFile (Join-Path $WorkDir ""config_output.txt"") $out
@@ -1470,7 +1451,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         configInput["InputFolder"] = inputFolder;
         configInput["OutputFolder"] = configuredOutputFolder;
         configInput["ChordalTol"] = chordalTol.ToString(CultureInfo.InvariantCulture);
-        configInput["AdjacencyTol"] = adjacencyTol.ToString(CultureInfo.InvariantCulture);
         configInput["AngularTol"] = angularTol.ToString(CultureInfo.InvariantCulture);
         configInput["ExportNotClosed"] = exportNotClosedMeshes ? "1" : "0";
         WriteKeyValueFile(Path.Combine(workDir, "config_input.txt"), configInput);
@@ -1510,7 +1490,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
             ApplyAdvancedOptions(
                 ParseInvariantDouble(configOutput, "ChordalTol", chordalTol),
-                ParseInvariantDouble(configOutput, "AdjacencyTol", adjacencyTol),
                 ParseInvariantDouble(configOutput, "AngularTol", angularTol),
                 GetFlag(configOutput, "ExportNotClosed"));
 
@@ -3424,7 +3403,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         {
             stlCreator1.AutoNormalGen = true;
             stlCreator1.ChordalTol = chordalTol;
-            stlCreator1.AdjacencyTol = adjacencyTol;
             stlCreator1.AngularTol = angularTol;
             stlCreator1.OutputFile = outputFile;
 
