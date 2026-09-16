@@ -340,6 +340,12 @@ public class NXJournal
     // Anche questo modificabile dal pannello "Opzioni avanzate".
     internal static bool exportNotClosedMeshes = true;
 
+    // La generazione della preview forza NX a renderizzare e scrivere un JPG.
+    // Su batch/server e assiemi con molte occorrenze il costo e' sensibile;
+    // resta quindi opt-in. La barra di avanzamento continua a funzionare anche
+    // senza immagine.
+    internal static bool enableProgressPreview = false;
+
     // Nome della sottocartella dove finiscono i corpi non chiusi: quando la
     // sorgente non e' raggruppata, e' direttamente dentro la cartella di
     // output; quando e' raggruppata (vedi ComputeExportFolders), e' annidata
@@ -381,10 +387,10 @@ public class NXJournal
     // centinaia di file, con diverse righe di log ciascuno, il solo overhead
     // di apertura/chiusura - specialmente su cartelle di rete o con antivirus
     // che intercetta ogni apertura file - poteva diventare un rallentamento
-    // misurabile). Il Flush() dopo ogni riga mantiene la stessa garanzia di
-    // "log leggibile anche in caso di crash" che si aveva prima, senza
-    // ripagare il costo di un open/close per riga.
+    // misurabile). Il buffer viene scaricato al termine di ogni STEP: il log
+    // resta recuperabile durante il batch senza pagare un flush per riga.
     private static StreamWriter logWriter = null;
+    private static bool incrementalLogHealthy = false;
 
     // Cartella temporanea creata per lo scambio di file con il processo
     // powershell.exe della GUI esterna (vedi RunExternalGuiFlow), e percorso
@@ -476,6 +482,7 @@ public class NXJournal
         if (decision == BatchDecision.Stop)
         {
             LogStopAndExit(lw, "Interrotto dall'utente prima di avviare la conversione. Nessun file scritto.");
+            TryCloseExternalGuiProcess();
             CleanUpExternalGuiWorkDir();
             return;
         }
@@ -1726,6 +1733,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     // o rallentare la conversione, che e' la parte che conta davvero.
     private static void CaptureAndDisplayScreenshot(Session theSession)
     {
+        if (!enableProgressPreview)
+        {
+            return;
+        }
         if (string.IsNullOrEmpty(externalGuiWorkDir))
         {
             return;
@@ -2086,19 +2097,26 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
     }
 
-    // Riscrive SEMPRE il log completo su file alla fine (anche se qualcosa e'
-    // andato storto, o se l'utente ha scelto di interrompere prima di
-    // iniziare), come rete di sicurezza aggiuntiva rispetto alla scrittura
-    // incrementale che avviene durante il batch dentro RunBatch.
+    // Chiude il log incrementale e lo riscrive completamente solo come rete di
+    // sicurezza quando lo stream non e' mai partito o ha segnalato un errore.
     private static void WriteFinalLogSafety()
     {
+        bool mustRewriteLog = !incrementalLogHealthy;
         if (logWriter != null)
         {
             try { logWriter.Flush(); }
-            catch (Exception) { /* la riscrittura completa qui sotto e' comunque la rete di sicurezza */ }
+            catch (Exception) { mustRewriteLog = true; }
             try { logWriter.Dispose(); }
-            catch (Exception) { /* handle gia' invalido: nulla da fare */ }
+            catch (Exception) { mustRewriteLog = true; }
             logWriter = null;
+        }
+
+        // Se lo stream incrementale ha scritto correttamente tutte le righe,
+        // il file e' gia' completo: riscriverlo da zero qui raddoppiava l'I/O
+        // proprio alla fine del batch, soprattutto su share/antivirus.
+        if (!mustRewriteLog)
+        {
+            return;
         }
 
         try
@@ -2141,6 +2159,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         // inizializzato con le righe gia' accumulate finora (es. il messaggio
         // di avvio), poi ogni chiamata a Log() vi appende una riga.
         logFilePath = Path.Combine(outputFolder, "log_conversione.txt");
+        incrementalLogHealthy = false;
         try
         {
             logWriter = new StreamWriter(logFilePath, false, new UTF8Encoding(false));
@@ -2149,6 +2168,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 logWriter.WriteLine(existingLine);
             }
             logWriter.Flush();
+            incrementalLogHealthy = true;
         }
         catch (Exception)
         {
@@ -2156,6 +2176,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             // File.AppendAllText riga per riga; resta comunque la scrittura
             // finale di sicurezza in WriteFinalLogSafety().
             logWriter = null;
+            incrementalLogHealthy = false;
         }
 
         if (decision == BatchDecision.CopyToNewFolder)
@@ -2385,7 +2406,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                         "Impossibile aprire il file STEP come parte di lavoro (nessuna Work part disponibile dopo OpenActiveDisplay): " + stepFile);
                 }
                 theSession.ApplicationSwitchImmediate("UG_APP_MODELING");
-                theSession.CleanUpFacetedFacesAndEdges();
 
                 CaptureAndDisplayScreenshot(theSession);
 
@@ -2506,14 +2526,17 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 // prima di passare al file successivo.
                 // NXOpen.BasePart.CloseModified e' un enum ANNIDATO dentro BasePart (non uno
                 // standalone "BasePartCloseModified" - quello era l'errore nella v1).
-                try
+                try { theSession.CleanUpFacetedFacesAndEdges(); }
+                catch (Exception exCleanup)
                 {
-                    theSession.Parts.CloseAll(NXOpen.BasePart.CloseModified.CloseModified, null);
+                    Log(lw, "  -> Avviso: errore durante la pulizia delle faccette: " + exCleanup.Message);
                 }
+                try { theSession.Parts.CloseAll(NXOpen.BasePart.CloseModified.CloseModified, null); }
                 catch (Exception exClose)
                 {
                     Log(lw, "  -> Avviso: errore durante la chiusura della parte: " + exClose.Message);
                 }
+                FlushIncrementalLog();
             }
 
             Log(lw, "");
@@ -3073,7 +3096,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                     "Impossibile aprire il file .prt come parte di lavoro (nessuna Work part disponibile dopo OpenActiveDisplay): " + prtPath);
             }
             theSession.ApplicationSwitchImmediate("UG_APP_MODELING");
-            theSession.CleanUpFacetedFacesAndEdges();
 
             CaptureAndDisplayScreenshot(theSession);
 
@@ -3141,14 +3163,14 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
         finally
         {
-            try
-            {
-                theSession.Parts.CloseAll(NXOpen.BasePart.CloseModified.CloseModified, null);
-            }
+            try { theSession.CleanUpFacetedFacesAndEdges(); }
+            catch (Exception) { /* best-effort: la chiusura va comunque tentata */ }
+            try { theSession.Parts.CloseAll(NXOpen.BasePart.CloseModified.CloseModified, null); }
             catch (Exception)
             {
                 // se anche la chiusura fallisce, si prosegue comunque con il componente successivo
             }
+            FlushIncrementalLog();
         }
     }
 
@@ -3263,9 +3285,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     // Restituisce la lista dei percorsi file EFFETTIVAMENTE scritti (esclusi
     // quelli saltati).
     //
-    // CleanUpFacetedFacesAndEdges() viene chiamata UNA SOLA VOLTA qui, dopo
-    // aver esportato tutti i corpi di questo gruppo, invece che dopo ogni
-    // singolo corpo: su parti con molti corpi evita chiamate ripetute inutili.
+    // La pulizia delle faccette viene eseguita dal chiamante una sola volta per
+    // parte, subito prima della chiusura, non una volta per corpo o gruppo.
     private static List<string> ExportBodiesSeparately(Session theSession, ListingWindow lw, List<Body> bodies,
         string outputFolder, string baseFileName, ref int skippedCount)
     {
@@ -3285,7 +3306,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             }
             ExportSingleBodyToStl(theSession, bodies[0], outFile);
             outputFiles.Add(outFile);
-            theSession.CleanUpFacetedFacesAndEdges();
             return outputFiles;
         }
 
@@ -3298,11 +3318,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             }
             ExportSingleBodyToStl(theSession, bodies[i], outFile);
             outputFiles.Add(outFile);
-        }
-
-        if (outputFiles.Count > 0)
-        {
-            theSession.CleanUpFacetedFacesAndEdges();
         }
 
         return outputFiles;
@@ -3418,7 +3433,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 if (logWriter != null)
                 {
                     logWriter.WriteLine(message);
-                    logWriter.Flush();
                 }
                 else
                 {
@@ -3427,11 +3441,30 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             }
             catch (Exception)
             {
+                incrementalLogHealthy = false;
                 // se anche l'append fallisce, il messaggio resta comunque in
                 // logLines e verra' ritentato nella scrittura finale.
             }
         }
 
+    }
+
+    // Mantiene il log recuperabile durante il batch senza forzare un flush per
+    // ogni singola riga. Il chiamante lo invoca al confine sicuro tra due STEP.
+    private static void FlushIncrementalLog()
+    {
+        if (logWriter == null)
+        {
+            return;
+        }
+        try
+        {
+            logWriter.Flush();
+        }
+        catch (Exception)
+        {
+            incrementalLogHealthy = false;
+        }
     }
 
     public static int GetUnloadOption(string dummy)

@@ -48,6 +48,7 @@ Settings are at the top of the `NXJournal` class. The two folder paths are only 
 | `adjacencyTol` | `0.08` | STL adjacency tolerance |
 | `angularTol` | `5.0` | STL angular tolerance |
 | `exportNotClosedMeshes` | `true` | If `true`, open/non-solid bodies are exported to a dedicated subfolder; if `false`, they're ignored |
+| `enableProgressPreview` | `false` | If `true`, periodically renders a JPG preview during conversion. Disabled by default because NX rendering and disk I/O can noticeably slow server batches. |
 | `notClosedSubfolderName` | `000_Not_Closed_Mesh` | Subfolder name where open bodies are exported (top-level or nested, depending on grouping) |
 | `notClosedSuffix` | `_NOT_CLOSED_MESH` | Suffix appended to open-body file names |
 | `trySeparateMultiLumpBodies` | `false` | Currently a no-op stub; reserved for future multi-lump body separation |
@@ -93,6 +94,8 @@ If a file or component fails, it doesn't block the rest of the batch: the error 
 ## Notes
 
 - Parts are always closed, even if the export fails, to avoid leftover open parts interfering with subsequent files.
+- The progress preview is disabled by default for performance. The progress bar, counters and logs continue to update without it.
+- The incremental log is buffered and flushed at the end of each STEP instead of after every line. When incremental logging succeeds, the finalization step closes the stream without rewriting the complete log.
 - If writing the log to file also fails (e.g. the output folder isn't writable), the script doesn't stop: it falls back to writing the log to the Desktop.
 - The component index (`component_index.txt`) is append-only and never deduplicated: each line represents one occurrence of a component in an assembly, so repeated components keep their correct quantity across runs. In "Copia in nuova cartella" mode, the new folder starts with its own empty index — it does not inherit the original folder's history.
 - Multi-lump body separation is not yet functional (`trySeparateMultiLumpBodies = false`, no-op stub) — see the comment above `TrySeparateMultiLumpBodies` in the source for how to help complete it by recording a journal of a manual "Separate Bodies" operation in your NX version.
