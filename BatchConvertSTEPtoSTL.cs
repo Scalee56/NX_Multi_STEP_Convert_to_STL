@@ -342,9 +342,15 @@ public class NXJournal
 
     // La generazione della preview forza NX a renderizzare e scrivere un JPG.
     // Su batch/server e assiemi con molte occorrenze il costo e' sensibile;
-    // resta quindi opt-in. La barra di avanzamento continua a funzionare anche
-    // senza immagine.
-    internal static bool enableProgressPreview = false;
+    // puo' essere disattivata sui server dove conta solo il throughput. Per il
+    // flusso interattivo resta attiva per mostrare il pezzo in elaborazione.
+    internal static bool enableProgressPreview = true;
+
+    // La vecchia scorciatoia riapriva, uno per uno, tutti i .prt elencati
+    // nell'indice persistente. Sugli assiemi con molte occorrenze era molto piu'
+    // lenta di una singola importazione dello STEP. Per default si riapre quindi
+    // sempre lo STEP originale; l'indice resta usato per scansione e naming.
+    internal static bool reuseIndexedComponentPrtFiles = false;
 
     // Nome della sottocartella dove finiscono i corpi non chiusi: quando la
     // sorgente non e' raggruppata, e' direttamente dentro la cartella di
@@ -1292,7 +1298,7 @@ $btnOpen.Add_Click({
 })
 
 $btnClose = New-Object System.Windows.Forms.Button
-$btnClose.Text = ""Chiudi""
+$btnClose.Text = ""Chiudi e termina""
 $btnClose.SetBounds(414, 368, 170, 42)
 $pnlSummary.Controls.Add($btnClose)
 Style-PrimaryButton $btnClose
@@ -1375,7 +1381,16 @@ $orchTimer.Add_Tick({
         }
         $summaryMeta = Read-KeyValueFile (Join-Path $WorkDir ""summary_meta.txt"")
         $script:summaryOutFolder = $summaryMeta[""OutputFolder""]
+        $finalLogPath = $summaryMeta[""LogFile""]
+        if (-not [string]::IsNullOrEmpty($finalLogPath) -and (Test-Path -LiteralPath $finalLogPath)) {
+            $completeLog = [string]::Join([Environment]::NewLine, (Get-Content -LiteralPath $finalLogPath -Encoding UTF8))
+            if (-not [string]::IsNullOrEmpty($completeLog)) {
+                $summaryText2 += [Environment]::NewLine + [Environment]::NewLine + ""--- LOG COMPLETO ---"" + [Environment]::NewLine + $completeLog
+            }
+        }
         $txtFinal.Text = $summaryText2
+        $txtFinal.SelectionStart = $txtFinal.TextLength
+        $txtFinal.ScrollToCaret()
 
         $pnlConfig.Visible = $false
         $pnlWaiting.Visible = $false
@@ -1386,6 +1401,7 @@ $orchTimer.Add_Tick({
         $form.AcceptButton = $btnClose
         $form.CancelButton = $null
         Center-Form $form 620 460
+        Set-Content -LiteralPath (Join-Path $WorkDir ""summary_shown.txt"") -Value ""shown"" -Encoding UTF8
     }
 })
 $orchTimer.Start()
@@ -1605,15 +1621,17 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
             Dictionary<string, string> meta = new Dictionary<string, string>();
             meta["OutputFolder"] = result.OutputFolder ?? "";
+            meta["LogFile"] = Path.Combine(result.OutputFolder ?? outputFolder, "log_conversione.txt");
             WriteKeyValueFile(Path.Combine(externalGuiWorkDir, "summary_meta.txt"), meta);
 
             SignalNextStage(externalGuiWorkDir, "Summary");
 
-            // Blocca finche' l'utente non chiude la finestra di riepilogo
-            // (stesso comportamento sincrono delle versioni precedenti, solo
-            // che qui non c'e' un nuovo processo da avviare: e' lo stesso
-            // gia' in esecuzione dall'inizio del run).
-            externalGuiProcess.WaitForExit();
+            // Attende soltanto che PowerShell abbia caricato e visualizzato il
+            // log. Non resta piu' bloccato fino alla chiusura manuale della
+            // finestra: il journal puo' terminare mentre il riepilogo resta
+            // consultabile come finestra indipendente.
+            string summaryShownPath = Path.Combine(externalGuiWorkDir, "summary_shown.txt");
+            WaitForFileOrProcessExit(externalGuiProcess, summaryShownPath, "Summary");
         }
         catch (Exception ex)
         {
@@ -2291,15 +2309,16 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             string baseName = Path.GetFileNameWithoutExtension(stepFile);
             Log(lw, string.Format("[{0}/{1}] {2}", i + 1, stepFiles.Count, baseName));
 
-            // Controllo indice: se questo step e' gia' stato processato come assieme
-            // in una precedente esecuzione, e i .prt dei suoi componenti esistono
-            // ancora nella cartella di input, evito di riaprire lo STEP (fallirebbe
-            // perche' NX trova gia' quei .prt) e apro direttamente i .prt registrati.
+            // Scorciatoia opzionale: se abilitata e questo STEP e' gia' stato
+            // indicizzato, apre direttamente i .prt dei componenti. E' disattivata
+            // per default perche' una singola apertura STEP e' normalmente piu'
+            // veloce di molte aperture/chiusure .prt.
             // La lista puo' contenere lo stesso nome piu' volte: rappresenta le
             // occorrenze/quantita' di quel componente nell'assieme.
-            List<string> knownComponents;
+            List<string> knownComponents = null;
             bool useKnownComponents = false;
-            if (componentIndex.TryGetValue(baseName, out knownComponents) && knownComponents.Count > 0)
+            if (reuseIndexedComponentPrtFiles &&
+                componentIndex.TryGetValue(baseName, out knownComponents) && knownComponents.Count > 0)
             {
                 useKnownComponents = true;
                 HashSet<string> distinctNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
