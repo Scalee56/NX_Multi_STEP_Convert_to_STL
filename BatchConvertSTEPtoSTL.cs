@@ -122,8 +122,8 @@
 //   il riepilogo (quanti file riusciti/falliti, quanti STL scritti) con un
 //   bottone per aprire direttamente la cartella di output.
 // - NUOVO: pannello "Opzioni avanzate" (nascosto di default) nella schermata
-//   di configurazione, per modificare le tolleranze STL (chordal, adjacency,
-//   angular) e se esportare anche le superfici non chiuse direttamente dalla
+//   di configurazione, per modificare le tolleranze STL visibili nel comando
+//   NX (chordal e angular) e se esportare anche le superfici non chiuse dalla
 //   GUI, senza piu' dover editare questo file per il caso comune di voler
 //   cambiare questi valori per una singola esecuzione.
 // - Rimangono finestre separate (MessageBox/FolderBrowserDialog) solo per le
@@ -180,8 +180,9 @@
 //   finally anche in caso di errore.
 // - FIX: log scritto in modo incrementale (append riga per riga) invece che
 //   solo a fine esecuzione.
-// - MIGLIORATA: CleanUpFacetedFacesAndEdges() chiamata una sola volta per
-//   gruppo di corpi esportati, non per ogni singolo corpo.
+// - La pulizia forzata delle faccette, presente nelle versioni precedenti, e'
+//   stata poi rimossa: prima della chiusura della parte poteva aggiungere una
+//   lunga pausa senza essere necessaria alla produzione degli STL.
 //
 // COSA ERA GIA' PRESENTE IN v7:
 // - NUOVO: se lo stesso componente compare piu' volte nell'assieme (es. 4 viti
@@ -331,7 +332,6 @@ public class NXJournal
     // avanzate" della GUI esterna (vedi ApplyAdvancedOptions) subito prima di
     // ogni esecuzione. Non piu' readonly per questo motivo.
     internal static double chordalTol   = 0.0025;
-    internal static double adjacencyTol = 0.08;
     internal static double angularTol   = 5.0;
 
     // true  = esporta anche i corpi NON solidi (superfici aperte/sheet) in una
@@ -339,6 +339,18 @@ public class NXJournal
     // false = i corpi non solidi vengono ignorati
     // Anche questo modificabile dal pannello "Opzioni avanzate".
     internal static bool exportNotClosedMeshes = true;
+
+    // La generazione della preview forza NX a renderizzare e scrivere un JPG.
+    // Su batch/server e assiemi con molte occorrenze il costo e' sensibile;
+    // puo' essere disattivata sui server dove conta solo il throughput. Per il
+    // flusso interattivo resta attiva per mostrare il pezzo in elaborazione.
+    internal static bool enableProgressPreview = true;
+
+    // La vecchia scorciatoia riapriva, uno per uno, tutti i .prt elencati
+    // nell'indice persistente. Sugli assiemi con molte occorrenze era molto piu'
+    // lenta di una singola importazione dello STEP. Per default si riapre quindi
+    // sempre lo STEP originale; l'indice resta usato per scansione e naming.
+    internal static bool reuseIndexedComponentPrtFiles = false;
 
     // Nome della sottocartella dove finiscono i corpi non chiusi: quando la
     // sorgente non e' raggruppata, e' direttamente dentro la cartella di
@@ -360,6 +372,8 @@ public class NXJournal
     // true = la decisione "Sovrascrivi" scelta dall'utente nella GUI e' attiva
     // per il run corrente (impostato una volta all'inizio di RunBatch).
     private static bool allowOverwrite = false;
+    private static string activeCancelMarkerPath = null;
+    private static string activeGuiCancelMarkerPath = null;
 
     // Percorsi assoluti gia' scritti in QUESTO run: usato per non sovrascrivere
     // mai silenziosamente un file appena prodotto da questo stesso batch,
@@ -381,10 +395,10 @@ public class NXJournal
     // centinaia di file, con diverse righe di log ciascuno, il solo overhead
     // di apertura/chiusura - specialmente su cartelle di rete o con antivirus
     // che intercetta ogni apertura file - poteva diventare un rallentamento
-    // misurabile). Il Flush() dopo ogni riga mantiene la stessa garanzia di
-    // "log leggibile anche in caso di crash" che si aveva prima, senza
-    // ripagare il costo di un open/close per riga.
+    // misurabile). Il buffer viene scaricato al termine di ogni STEP: il log
+    // resta recuperabile durante il batch senza pagare un flush per riga.
     private static StreamWriter logWriter = null;
+    private static bool incrementalLogHealthy = false;
 
     // Cartella temporanea creata per lo scambio di file con il processo
     // powershell.exe della GUI esterna (vedi RunExternalGuiFlow), e percorso
@@ -428,10 +442,9 @@ public class NXJournal
     // Applica le opzioni scelte nel pannello "Opzioni avanzate" della GUI
     // (o i valori di default, se il pannello non e' mai stato aperto) prima
     // di avviare una conversione.
-    internal static void ApplyAdvancedOptions(double chordal, double adjacency, double angular, bool exportOpenBodies)
+    internal static void ApplyAdvancedOptions(double chordal, double angular, bool exportOpenBodies)
     {
         chordalTol = chordal;
-        adjacencyTol = adjacency;
         angularTol = angular;
         exportNotClosedMeshes = exportOpenBodies;
     }
@@ -476,6 +489,7 @@ public class NXJournal
         if (decision == BatchDecision.Stop)
         {
             LogStopAndExit(lw, "Interrotto dall'utente prima di avviare la conversione. Nessun file scritto.");
+            TryCloseExternalGuiProcess();
             CleanUpExternalGuiWorkDir();
             return;
         }
@@ -744,14 +758,43 @@ function Center-Form($targetForm, $w, $h) {
 
 $form = New-Object System.Windows.Forms.Form
 $form.StartPosition = ""Manual""
-$form.FormBorderStyle = ""FixedDialog""
-$form.MinimizeBox = $false
+$form.FormBorderStyle = ""FixedSingle""
+$form.MinimizeBox = $true
 $form.MaximizeBox = $false
 $form.Topmost = $true
 Style-Form $form
 
 $configInputFile = Join-Path $WorkDir ""config_input.txt""
 $cfg = Read-KeyValueFile $configInputFile
+
+# Il pulsante standard di riduzione a icona minimizza insieme la GUI e la
+# finestra principale NX, poi le ripristina insieme.
+Add-Type @""
+using System;
+using System.Runtime.InteropServices;
+public static class NxWindowControl {
+    [DllImport(""user32.dll"")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+    [DllImport(""user32.dll"")]
+    public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+}
+""@
+$script:nxProcessId = 0
+[int]::TryParse($cfg[""NxProcessId""], [ref]$script:nxProcessId) | Out-Null
+$script:minimizedNxWithGui = $false
+$form.Add_Resize({
+    if ($script:nxProcessId -le 0) { return }
+    try {
+        $nxProcess = Get-Process -Id $script:nxProcessId -ErrorAction Stop
+        if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+            [NxWindowControl]::ShowWindowAsync($nxProcess.MainWindowHandle, 6) | Out-Null
+            $script:minimizedNxWithGui = $true
+        } elseif ($script:minimizedNxWithGui -and $form.WindowState -eq [System.Windows.Forms.FormWindowState]::Normal) {
+            [NxWindowControl]::ShowWindowAsync($nxProcess.MainWindowHandle, 9) | Out-Null
+            $script:minimizedNxWithGui = $false
+        }
+    } catch {}
+})
 
 # --- Pannello Config --------------------------------------------------------
 $pnlConfig = New-Object System.Windows.Forms.Panel
@@ -850,30 +893,14 @@ $numChordal.Value = [decimal](Parse-Double $cfg[""ChordalTol""] 0.0025)
 Style-NumericUpDown $numChordal
 $panelAdv.Controls.Add($numChordal)
 
-$lblAdj = New-Object System.Windows.Forms.Label
-$lblAdj.Text = ""Tolleranza adjacency:""
-$lblAdj.SetBounds(14, 46, 160, 20)
-Style-Label $lblAdj
-$panelAdv.Controls.Add($lblAdj)
-
-$numAdj = New-Object System.Windows.Forms.NumericUpDown
-$numAdj.SetBounds(184, 44, 100, 24)
-$numAdj.DecimalPlaces = 3
-$numAdj.Increment = 0.01
-$numAdj.Minimum = 0.001
-$numAdj.Maximum = 100
-$numAdj.Value = [decimal](Parse-Double $cfg[""AdjacencyTol""] 0.08)
-Style-NumericUpDown $numAdj
-$panelAdv.Controls.Add($numAdj)
-
 $lblAng = New-Object System.Windows.Forms.Label
 $lblAng.Text = ""Tolleranza angular:""
-$lblAng.SetBounds(14, 78, 160, 20)
+$lblAng.SetBounds(14, 46, 160, 20)
 Style-Label $lblAng
 $panelAdv.Controls.Add($lblAng)
 
 $numAng = New-Object System.Windows.Forms.NumericUpDown
-$numAng.SetBounds(184, 76, 100, 24)
+$numAng.SetBounds(184, 44, 100, 24)
 $numAng.DecimalPlaces = 1
 $numAng.Increment = 0.5
 $numAng.Minimum = 0.1
@@ -884,7 +911,7 @@ $panelAdv.Controls.Add($numAng)
 
 $chkExportOpen = New-Object System.Windows.Forms.CheckBox
 $chkExportOpen.Text = ""Esporta anche i corpi non chiusi (superfici aperte)""
-$chkExportOpen.SetBounds(14, 108, 480, 22)
+$chkExportOpen.SetBounds(14, 78, 480, 22)
 $chkExportOpen.Checked = ($cfg[""ExportNotClosed""] -ne ""0"")
 Style-CheckBox $chkExportOpen
 $panelAdv.Controls.Add($chkExportOpen)
@@ -965,7 +992,6 @@ $btnScanConfig.Add_Click({
     $out[""InputFolder""] = $txtIn.Text
     $out[""OutputFolder""] = $txtOut.Text
     $out[""ChordalTol""] = $numChordal.Value.ToString($ic)
-    $out[""AdjacencyTol""] = $numAdj.Value.ToString($ic)
     $out[""AngularTol""] = $numAng.Value.ToString($ic)
     $out[""ExportNotClosed""] = if ($chkExportOpen.Checked) { ""1"" } else { ""0"" }
     Write-KeyValueFile (Join-Path $WorkDir ""config_output.txt"") $out
@@ -1131,17 +1157,45 @@ $pnlProgress.Controls.Add($btnCancelProgress)
 Style-SecondaryButton $btnCancelProgress
 
 $script:cancelRequested = $false
-$btnCancelProgress.Add_Click({
+function Request-ProgressCancel {
+    if ($script:cancelRequested) { return }
     $script:cancelRequested = $true
-    $btnCancelProgress.Enabled = $false
-    $btnCancelProgress.Text = ""Annullamento...""
     if (-not [string]::IsNullOrEmpty($script:progressOutFolder)) {
         try {
             if (-not (Test-Path -LiteralPath $script:progressOutFolder)) { New-Item -ItemType Directory -Path $script:progressOutFolder -Force | Out-Null }
             Set-Content -LiteralPath (Join-Path $script:progressOutFolder ""CANCEL.txt"") -Value ""cancel"" -Encoding UTF8
-        } catch {
-        }
+        } catch {}
     }
+    try {
+        Set-Content -LiteralPath (Join-Path $WorkDir ""cancel_request.txt"") -Value ""cancel"" -Encoding UTF8
+    } catch {}
+
+    # Best-effort: oltre ai marker cooperativi, inoltra a NX gli stessi input
+    # che l'utente userebbe per interrompere un journal (Esc e Ctrl+Break).
+    # Non termina mai nx.exe automaticamente: una chiusura forzata farebbe
+    # perdere eventuali modifiche non salvate.
+    if ($script:nxProcessId -gt 0) {
+        try {
+            $nxProcess = Get-Process -Id $script:nxProcessId -ErrorAction Stop
+            $hWnd = $nxProcess.MainWindowHandle
+            if ($hWnd -ne [IntPtr]::Zero) {
+                $WM_KEYDOWN = 0x0100
+                $WM_KEYUP = 0x0101
+                $VK_ESCAPE = 0x1B
+                $VK_CANCEL = 0x03
+                [NxWindowControl]::PostMessage($hWnd, $WM_KEYDOWN, [IntPtr]$VK_ESCAPE, [IntPtr]::Zero) | Out-Null
+                [NxWindowControl]::PostMessage($hWnd, $WM_KEYUP, [IntPtr]$VK_ESCAPE, [IntPtr]::Zero) | Out-Null
+                [NxWindowControl]::PostMessage($hWnd, $WM_KEYDOWN, [IntPtr]$VK_CANCEL, [IntPtr]::Zero) | Out-Null
+                [NxWindowControl]::PostMessage($hWnd, $WM_KEYUP, [IntPtr]$VK_CANCEL, [IntPtr]::Zero) | Out-Null
+            }
+        } catch {}
+    }
+}
+$btnCancelProgress.Add_Click({
+    Request-ProgressCancel
+    $btnCancelProgress.Enabled = $false
+    $btnCancelProgress.Text = ""Annullamento...""
+    $form.Close()
 })
 
 # Due timer separati: uno ""lento"" (poll) legge il file di stato scritto
@@ -1153,6 +1207,7 @@ $btnCancelProgress.Add_Click({
 # del riepilogo finale, che il journal C# scrivera' a breve.
 $script:targetWidth = 2
 $script:doneReceived = $false
+$script:summaryDisplayed = $false
 $script:previewLastWrite = [DateTime]::MinValue
 $script:progressTotalInitial = 0
 $script:progressStatusFile = """"
@@ -1239,7 +1294,7 @@ $progressRenderTimer.Add_Tick({
         $pnlFill.Region = New-RoundedRegion $newWidth $pnlFill.Height 7
     }
 
-    if ($script:doneReceived -and $pnlFill.Width -ge $script:targetWidth) {
+    if ($script:doneReceived -and -not $script:summaryDisplayed -and $pnlFill.Width -ge $script:targetWidth) {
         $progressPollTimer.Stop()
         $progressRenderTimer.Stop()
         $progressSpinnerTimer.Stop()
@@ -1285,7 +1340,7 @@ $btnOpen.Add_Click({
 })
 
 $btnClose = New-Object System.Windows.Forms.Button
-$btnClose.Text = ""Chiudi""
+$btnClose.Text = ""Chiudi e termina""
 $btnClose.SetBounds(414, 368, 170, 42)
 $pnlSummary.Controls.Add($btnClose)
 Style-PrimaryButton $btnClose
@@ -1342,6 +1397,7 @@ $orchTimer.Add_Tick({
         $script:progressStartTime = Get-Date
         $script:targetWidth = 2
         $script:doneReceived = $false
+        $script:summaryDisplayed = $false
         $script:cancelRequested = $false
         $btnCancelProgress.Enabled = $true
         $btnCancelProgress.Text = ""Annulla""
@@ -1361,6 +1417,16 @@ $orchTimer.Add_Tick({
         $progressSpinnerTimer.Start()
     }
     elseif ($stageName -eq ""Summary"") {
+        # Il comando Summary puo' arrivare prima che l'animazione abbia gestito
+        # Done=1. Ferma subito tutti i timer per evitare che il render timer
+        # rimetta la GUI su ""Preparazione del riepilogo..."" dopo aver gia'
+        # mostrato il log finale.
+        $script:summaryDisplayed = $true
+        $script:doneReceived = $true
+        $progressPollTimer.Stop()
+        $progressRenderTimer.Stop()
+        $progressSpinnerTimer.Stop()
+        if ($picPreview.Image) { $picPreview.Image.Dispose(); $picPreview.Image = $null }
         $summaryInputFile = Join-Path $WorkDir ""summary_input.txt""
         $summaryText2 = """"
         if (Test-Path -LiteralPath $summaryInputFile) {
@@ -1368,7 +1434,16 @@ $orchTimer.Add_Tick({
         }
         $summaryMeta = Read-KeyValueFile (Join-Path $WorkDir ""summary_meta.txt"")
         $script:summaryOutFolder = $summaryMeta[""OutputFolder""]
+        $finalLogPath = $summaryMeta[""LogFile""]
+        if (-not [string]::IsNullOrEmpty($finalLogPath) -and (Test-Path -LiteralPath $finalLogPath)) {
+            $completeLog = [string]::Join([Environment]::NewLine, (Get-Content -LiteralPath $finalLogPath -Encoding UTF8))
+            if (-not [string]::IsNullOrEmpty($completeLog)) {
+                $summaryText2 = $completeLog
+            }
+        }
         $txtFinal.Text = $summaryText2
+        $txtFinal.SelectionStart = $txtFinal.TextLength
+        $txtFinal.ScrollToCaret()
 
         $pnlConfig.Visible = $false
         $pnlWaiting.Visible = $false
@@ -1379,6 +1454,7 @@ $orchTimer.Add_Tick({
         $form.AcceptButton = $btnClose
         $form.CancelButton = $null
         Center-Form $form 620 460
+        Set-Content -LiteralPath (Join-Path $WorkDir ""summary_shown.txt"") -Value ""shown"" -Encoding UTF8
     }
 })
 $orchTimer.Start()
@@ -1397,6 +1473,11 @@ Enable-FadeIn $form
 # testo appare ""sempre evidenziato in blu""). Sposto solo il cursore
 # a inizio testo, senza selezionare nulla.
 $form.Add_Shown({ $txtIn.Select(0, 0) })
+$form.Add_FormClosing({
+    if ($pnlProgress.Visible -and -not $script:doneReceived) {
+        Request-ProgressCancel
+    }
+})
 
 [void]$form.ShowDialog()
 
@@ -1435,8 +1516,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         Dictionary<string, string> configInput = new Dictionary<string, string>();
         configInput["InputFolder"] = inputFolder;
         configInput["OutputFolder"] = configuredOutputFolder;
+        configInput["NxProcessId"] = Process.GetCurrentProcess().Id.ToString(CultureInfo.InvariantCulture);
         configInput["ChordalTol"] = chordalTol.ToString(CultureInfo.InvariantCulture);
-        configInput["AdjacencyTol"] = adjacencyTol.ToString(CultureInfo.InvariantCulture);
         configInput["AngularTol"] = angularTol.ToString(CultureInfo.InvariantCulture);
         configInput["ExportNotClosed"] = exportNotClosedMeshes ? "1" : "0";
         WriteKeyValueFile(Path.Combine(workDir, "config_input.txt"), configInput);
@@ -1476,7 +1557,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
             ApplyAdvancedOptions(
                 ParseInvariantDouble(configOutput, "ChordalTol", chordalTol),
-                ParseInvariantDouble(configOutput, "AdjacencyTol", adjacencyTol),
                 ParseInvariantDouble(configOutput, "AngularTol", angularTol),
                 GetFlag(configOutput, "ExportNotClosed"));
 
@@ -1598,15 +1678,17 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
             Dictionary<string, string> meta = new Dictionary<string, string>();
             meta["OutputFolder"] = result.OutputFolder ?? "";
+            meta["LogFile"] = Path.Combine(result.OutputFolder ?? outputFolder, "log_conversione.txt");
             WriteKeyValueFile(Path.Combine(externalGuiWorkDir, "summary_meta.txt"), meta);
 
             SignalNextStage(externalGuiWorkDir, "Summary");
 
-            // Blocca finche' l'utente non chiude la finestra di riepilogo
-            // (stesso comportamento sincrono delle versioni precedenti, solo
-            // che qui non c'e' un nuovo processo da avviare: e' lo stesso
-            // gia' in esecuzione dall'inizio del run).
-            externalGuiProcess.WaitForExit();
+            // Attende soltanto che PowerShell abbia caricato e visualizzato il
+            // log. Non resta piu' bloccato fino alla chiusura manuale della
+            // finestra: il journal puo' terminare mentre il riepilogo resta
+            // consultabile come finestra indipendente.
+            string summaryShownPath = Path.Combine(externalGuiWorkDir, "summary_shown.txt");
+            WaitForFileOrProcessExit(externalGuiProcess, summaryShownPath, "Summary");
         }
         catch (Exception ex)
         {
@@ -1726,6 +1808,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     // o rallentare la conversione, che e' la parte che conta davvero.
     private static void CaptureAndDisplayScreenshot(Session theSession)
     {
+        if (!enableProgressPreview)
+        {
+            return;
+        }
         if (string.IsNullOrEmpty(externalGuiWorkDir))
         {
             return;
@@ -2086,19 +2172,26 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
     }
 
-    // Riscrive SEMPRE il log completo su file alla fine (anche se qualcosa e'
-    // andato storto, o se l'utente ha scelto di interrompere prima di
-    // iniziare), come rete di sicurezza aggiuntiva rispetto alla scrittura
-    // incrementale che avviene durante il batch dentro RunBatch.
+    // Chiude il log incrementale e lo riscrive completamente solo come rete di
+    // sicurezza quando lo stream non e' mai partito o ha segnalato un errore.
     private static void WriteFinalLogSafety()
     {
+        bool mustRewriteLog = !incrementalLogHealthy;
         if (logWriter != null)
         {
             try { logWriter.Flush(); }
-            catch (Exception) { /* la riscrittura completa qui sotto e' comunque la rete di sicurezza */ }
+            catch (Exception) { mustRewriteLog = true; }
             try { logWriter.Dispose(); }
-            catch (Exception) { /* handle gia' invalido: nulla da fare */ }
+            catch (Exception) { mustRewriteLog = true; }
             logWriter = null;
+        }
+
+        // Se lo stream incrementale ha scritto correttamente tutte le righe,
+        // il file e' gia' completo: riscriverlo da zero qui raddoppiava l'I/O
+        // proprio alla fine del batch, soprattutto su share/antivirus.
+        if (!mustRewriteLog)
+        {
+            return;
         }
 
         try
@@ -2141,6 +2234,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         // inizializzato con le righe gia' accumulate finora (es. il messaggio
         // di avvio), poi ogni chiamata a Log() vi appende una riga.
         logFilePath = Path.Combine(outputFolder, "log_conversione.txt");
+        incrementalLogHealthy = false;
         try
         {
             logWriter = new StreamWriter(logFilePath, false, new UTF8Encoding(false));
@@ -2149,6 +2243,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 logWriter.WriteLine(existingLine);
             }
             logWriter.Flush();
+            incrementalLogHealthy = true;
         }
         catch (Exception)
         {
@@ -2156,6 +2251,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             // File.AppendAllText riga per riga; resta comunque la scrittura
             // finale di sicurezza in WriteFinalLogSafety().
             logWriter = null;
+            incrementalLogHealthy = false;
         }
 
         if (decision == BatchDecision.CopyToNewFolder)
@@ -2188,6 +2284,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         // nella cartella di output (es. da Esplora risorse) durante
         // l'esecuzione, il batch si ferma pulito al file STEP successivo.
         string cancelMarkerPath = Path.Combine(outputFolder, "CANCEL.txt");
+        activeCancelMarkerPath = cancelMarkerPath;
+        activeGuiCancelMarkerPath = string.IsNullOrEmpty(externalGuiWorkDir)
+            ? null
+            : Path.Combine(externalGuiWorkDir, "cancel_request.txt");
         Log(lw, "Per annullare durante l'esecuzione, crea un file di nome CANCEL.txt in: " + outputFolder);
         Log(lw, "");
 
@@ -2256,13 +2356,14 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 WriteProgressStatus(progressStatusPath, i, stepFiles.Count, Path.GetFileNameWithoutExtension(stepFiles[i]), ok, failed, false);
             }
 
-            if (File.Exists(cancelMarkerPath))
+            if (IsCancellationRequested())
             {
                 cancelled = true;
                 Log(lw, "");
                 Log(lw, string.Format("Annullato dall'utente: interrotto dopo {0} di {1} file STEP.", i, stepFiles.Count));
                 try { if (File.Exists(cancelMarkerPath)) File.Delete(cancelMarkerPath); }
                 catch (Exception) { /* marker gia' rimosso o non cancellabile: non blocca l'interruzione */ }
+                DeleteGuiCancelMarker();
                 break;
             }
 
@@ -2270,15 +2371,16 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             string baseName = Path.GetFileNameWithoutExtension(stepFile);
             Log(lw, string.Format("[{0}/{1}] {2}", i + 1, stepFiles.Count, baseName));
 
-            // Controllo indice: se questo step e' gia' stato processato come assieme
-            // in una precedente esecuzione, e i .prt dei suoi componenti esistono
-            // ancora nella cartella di input, evito di riaprire lo STEP (fallirebbe
-            // perche' NX trova gia' quei .prt) e apro direttamente i .prt registrati.
+            // Scorciatoia opzionale: se abilitata e questo STEP e' gia' stato
+            // indicizzato, apre direttamente i .prt dei componenti. E' disattivata
+            // per default perche' una singola apertura STEP e' normalmente piu'
+            // veloce di molte aperture/chiusure .prt.
             // La lista puo' contenere lo stesso nome piu' volte: rappresenta le
             // occorrenze/quantita' di quel componente nell'assieme.
-            List<string> knownComponents;
+            List<string> knownComponents = null;
             bool useKnownComponents = false;
-            if (componentIndex.TryGetValue(baseName, out knownComponents) && knownComponents.Count > 0)
+            if (reuseIndexedComponentPrtFiles &&
+                componentIndex.TryGetValue(baseName, out knownComponents) && knownComponents.Count > 0)
             {
                 useKnownComponents = true;
                 HashSet<string> distinctNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2385,7 +2487,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                         "Impossibile aprire il file STEP come parte di lavoro (nessuna Work part disponibile dopo OpenActiveDisplay): " + stepFile);
                 }
                 theSession.ApplicationSwitchImmediate("UG_APP_MODELING");
-                theSession.CleanUpFacetedFacesAndEdges();
 
                 CaptureAndDisplayScreenshot(theSession);
 
@@ -2493,6 +2594,15 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                         exportedHere, failedHere));
                 }
             }
+            catch (OperationCanceledException)
+            {
+                cancelled = true;
+                Log(lw, "  -> ANNULLATO dall'utente.");
+                try { if (File.Exists(cancelMarkerPath)) File.Delete(cancelMarkerPath); }
+                catch (Exception) { }
+                DeleteGuiCancelMarker();
+                break;
+            }
             catch (Exception ex)
             {
                 failed++;
@@ -2506,14 +2616,12 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 // prima di passare al file successivo.
                 // NXOpen.BasePart.CloseModified e' un enum ANNIDATO dentro BasePart (non uno
                 // standalone "BasePartCloseModified" - quello era l'errore nella v1).
-                try
-                {
-                    theSession.Parts.CloseAll(NXOpen.BasePart.CloseModified.CloseModified, null);
-                }
+                try { theSession.Parts.CloseAll(NXOpen.BasePart.CloseModified.CloseModified, null); }
                 catch (Exception exClose)
                 {
                     Log(lw, "  -> Avviso: errore durante la chiusura della parte: " + exClose.Message);
                 }
+                FlushIncrementalLog();
             }
 
             Log(lw, "");
@@ -3022,6 +3130,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
         catch (Exception ex)
         {
+            if (ex is OperationCanceledException)
+            {
+                throw;
+            }
             compFailed++;
             File.AppendAllText(errLogPath,
                 string.Format("{0} - componente {1} (occorrenza {2}/{3}) - {4}{5}",
@@ -3073,7 +3185,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                     "Impossibile aprire il file .prt come parte di lavoro (nessuna Work part disponibile dopo OpenActiveDisplay): " + prtPath);
             }
             theSession.ApplicationSwitchImmediate("UG_APP_MODELING");
-            theSession.CleanUpFacetedFacesAndEdges();
 
             CaptureAndDisplayScreenshot(theSession);
 
@@ -3134,6 +3245,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
         catch (Exception ex)
         {
+            if (ex is OperationCanceledException)
+            {
+                throw;
+            }
             compFailed++;
             File.AppendAllText(errLogPath,
                 string.Format("{0} - componente (prt diretto) {1} - {2}{3}", DateTime.Now, fileBaseName, ex.Message, Environment.NewLine));
@@ -3141,14 +3256,12 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
         finally
         {
-            try
-            {
-                theSession.Parts.CloseAll(NXOpen.BasePart.CloseModified.CloseModified, null);
-            }
+            try { theSession.Parts.CloseAll(NXOpen.BasePart.CloseModified.CloseModified, null); }
             catch (Exception)
             {
                 // se anche la chiusura fallisce, si prosegue comunque con il componente successivo
             }
+            FlushIncrementalLog();
         }
     }
 
@@ -3263,9 +3376,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     // Restituisce la lista dei percorsi file EFFETTIVAMENTE scritti (esclusi
     // quelli saltati).
     //
-    // CleanUpFacetedFacesAndEdges() viene chiamata UNA SOLA VOLTA qui, dopo
-    // aver esportato tutti i corpi di questo gruppo, invece che dopo ogni
-    // singolo corpo: su parti con molti corpi evita chiamate ripetute inutili.
+    // Non forza CleanUpFacetedFacesAndEdges: la parte viene chiusa dal chiamante
+    // e la pulizia aggiungeva una lunga pausa dopo l'ultimo export.
     private static List<string> ExportBodiesSeparately(Session theSession, ListingWindow lw, List<Body> bodies,
         string outputFolder, string baseFileName, ref int skippedCount)
     {
@@ -3278,6 +3390,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
         if (bodies.Count == 1)
         {
+            ThrowIfCancellationRequested();
             string outFile = Path.Combine(outputFolder, baseFileName + ".stl");
             if (!TryReserveOutputFile(lw, outFile, ref skippedCount))
             {
@@ -3285,12 +3398,12 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             }
             ExportSingleBodyToStl(theSession, bodies[0], outFile);
             outputFiles.Add(outFile);
-            theSession.CleanUpFacetedFacesAndEdges();
             return outputFiles;
         }
 
         for (int i = 0; i < bodies.Count; i++)
         {
+            ThrowIfCancellationRequested();
             string outFile = Path.Combine(outputFolder, string.Format("{0}_corpo{1:00}.stl", baseFileName, i + 1));
             if (!TryReserveOutputFile(lw, outFile, ref skippedCount))
             {
@@ -3300,12 +3413,33 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             outputFiles.Add(outFile);
         }
 
-        if (outputFiles.Count > 0)
-        {
-            theSession.CleanUpFacetedFacesAndEdges();
-        }
-
         return outputFiles;
+    }
+
+    private static void ThrowIfCancellationRequested()
+    {
+        if (IsCancellationRequested())
+        {
+            throw new OperationCanceledException("Conversione annullata dall'utente.");
+        }
+    }
+
+    private static bool IsCancellationRequested()
+    {
+        return (!string.IsNullOrEmpty(activeCancelMarkerPath) && File.Exists(activeCancelMarkerPath)) ||
+            (!string.IsNullOrEmpty(activeGuiCancelMarkerPath) && File.Exists(activeGuiCancelMarkerPath));
+    }
+
+    private static void DeleteGuiCancelMarker()
+    {
+        try
+        {
+            if (!string.IsNullOrEmpty(activeGuiCancelMarkerPath) && File.Exists(activeGuiCancelMarkerPath))
+            {
+                File.Delete(activeGuiCancelMarkerPath);
+            }
+        }
+        catch (Exception) { }
     }
 
     // Decide se un file di output puo' essere scritto in "outFile":
@@ -3359,7 +3493,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         {
             stlCreator1.AutoNormalGen = true;
             stlCreator1.ChordalTol = chordalTol;
-            stlCreator1.AdjacencyTol = adjacencyTol;
             stlCreator1.AngularTol = angularTol;
             stlCreator1.OutputFile = outputFile;
 
@@ -3418,7 +3551,6 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 if (logWriter != null)
                 {
                     logWriter.WriteLine(message);
-                    logWriter.Flush();
                 }
                 else
                 {
@@ -3427,11 +3559,30 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             }
             catch (Exception)
             {
+                incrementalLogHealthy = false;
                 // se anche l'append fallisce, il messaggio resta comunque in
                 // logLines e verra' ritentato nella scrittura finale.
             }
         }
 
+    }
+
+    // Mantiene il log recuperabile durante il batch senza forzare un flush per
+    // ogni singola riga. Il chiamante lo invoca al confine sicuro tra due STEP.
+    private static void FlushIncrementalLog()
+    {
+        if (logWriter == null)
+        {
+            return;
+        }
+        try
+        {
+            logWriter.Flush();
+        }
+        catch (Exception)
+        {
+            incrementalLogHealthy = false;
+        }
     }
 
     public static int GetUnloadOption(string dummy)
