@@ -45,9 +45,10 @@ Settings are at the top of the `NXJournal` class. The two folder paths are only 
 | `inputFolder` | `C:\Users\AndreaScalenghe\Desktop\STEP_Convert` | Default folder containing the STEP files to convert (and, for previously-processed assemblies, their components' `.prt` files) — can be changed per run in the folder dialog |
 | `configuredOutputFolder` | `C:\Users\AndreaScalenghe\Desktop\STL_Convert` | Default destination folder for STL files, logs and the component index — can be changed per run in the folder dialog |
 | `chordalTol` | `0.0025` | STL chordal tolerance |
-| `adjacencyTol` | `0.08` | STL adjacency tolerance |
 | `angularTol` | `5.0` | STL angular tolerance |
 | `exportNotClosedMeshes` | `true` | If `true`, open/non-solid bodies are exported to a dedicated subfolder; if `false`, they're ignored |
+| `enableProgressPreview` | `true` | Periodically renders the current NX view in the progress window. Set to `false` only for unattended/server runs where maximum throughput matters more than the preview. |
+| `reuseIndexedComponentPrtFiles` | `false` | If `true`, a previously indexed assembly is rebuilt by reopening every component `.prt`. Disabled by default because opening the original STEP once is normally much faster, especially with repeated components. |
 | `notClosedSubfolderName` | `000_Not_Closed_Mesh` | Subfolder name where open bodies are exported (top-level or nested, depending on grouping) |
 | `notClosedSuffix` | `_NOT_CLOSED_MESH` | Suffix appended to open-body file names |
 | `trySeparateMultiLumpBodies` | `false` | Currently a no-op stub; reserved for future multi-lump body separation |
@@ -71,7 +72,8 @@ To change the tolerances or the default folders, edit these lines directly befor
 6. When it's done, check the output folder (the original one, or the new timestamped one if you chose "Copia in nuova cartella"):
    - The converted `.stl` files, flat or grouped into per-source subfolders depending on how many files each source produced (see "Output layout" above).
    - `000_Not_Closed_Mesh\` folders (top-level and/or nested inside grouped subfolders): STL files for open/non-solid bodies, if any were found and `exportNotClosedMeshes` is `true`.
-   - `log_conversione.txt`: full run log, written incrementally as the batch progresses.
+   - `log_conversione.txt`: compact final report shown by the GUI, with totals and one result block per STEP.
+   - `log_conversione_dettaglio.txt`: verbose technical trace captured incrementally during the run, retained for diagnostics.
    - `errori_conversione.log`: only present if at least one file/component failed, with one line per failure (timestamp, file/component, error message).
    - `component_index.txt`: persistent map of STEP file → component occurrences, used on later runs both to reopen known assemblies' `.prt` files directly instead of the STEP, and to detect cross-assembly naming collisions.
    - `ultima_scansione.txt`: full detail of the last pre-flight scan (every STEP file's status), even for entries the summary dialog had to truncate.
@@ -92,7 +94,16 @@ If a file or component fails, it doesn't block the rest of the batch: the error 
 
 ## Notes
 
-- Parts are always closed, even if the export fails, to avoid leftover open parts interfering with subsequent files.
+- Parts are always closed, even if the export fails, to avoid leftover open parts interfering with subsequent files. Faceted-data cleanup is not forced before closing because it can add a long, unnecessary pause after the last STL.
+- The progress preview is enabled by default. It can be disabled with `enableProgressPreview` for unattended runs.
+- Previously indexed component `.prt` files are not reopened by default: the journal imports the original STEP once, avoiding one NX open/close cycle per indexed occurrence.
+- The final window directly shows `log_conversione.txt`, already positioned at the last lines. Once the log is visible the NX journal is allowed to finish immediately; the independent summary window remains open until you close it.
+- `log_conversione.txt` is rewritten at completion as a compact report with totals, input/output paths, mode and one readable result block per STEP. The verbose incremental trace is preserved separately as `log_conversione_dettaglio.txt` for diagnostics.
+- Clicking **Annulla** or closing the GUI during conversion writes the cancellation marker and closes the GUI. Cancellation is cooperative and is checked between STL bodies/components, so an NX `Commit()` already in progress is allowed to finish safely before the journal stops.
+- Both cancellation paths also send best-effort `Esc` and `Ctrl+Break` messages to the NX main window. The tool deliberately never terminates `nx.exe` automatically, because doing so could discard unrelated unsaved work; if NX is blocked inside a native operation and ignores both messages, only the user can decide whether to end NX from Task Manager.
+- The standard minimize button minimizes the GUI and every visible top-level window owned by the NX process; restoring the GUI restores those NX windows too. A separate **Riduci NX** button is available in the progress and final panels to minimize NX while leaving the GUI visible.
+- The final-summary transition stops all progress timers before showing the completed log, preventing the waiting spinner from covering an already completed result.
+- The incremental log is buffered and flushed at the end of each STEP instead of after every line. When incremental logging succeeds, the finalization step closes the stream without rewriting the complete log.
 - If writing the log to file also fails (e.g. the output folder isn't writable), the script doesn't stop: it falls back to writing the log to the Desktop.
 - The component index (`component_index.txt`) is append-only and never deduplicated: each line represents one occurrence of a component in an assembly, so repeated components keep their correct quantity across runs. In "Copia in nuova cartella" mode, the new folder starts with its own empty index — it does not inherit the original folder's history.
 - Multi-lump body separation is not yet functional (`trySeparateMultiLumpBodies = false`, no-op stub) — see the comment above `TrySeparateMultiLumpBodies` in the source for how to help complete it by recording a journal of a manual "Separate Bodies" operation in your NX version.
@@ -100,4 +111,4 @@ If a file or component fails, it doesn't block the rest of the batch: the error 
 - **Automatic fallback.** If launching `powershell.exe` fails for any reason (not installed, blocked by a security policy, or anything else), the journal logs it and transparently switches to a flow built only from `MessageBox` and `FolderBrowserDialog` shown directly inside NX (native Windows dialogs, not a managed `Form`, so unaffected by the crash described above). This fallback has the same "ask only if there's a real decision to make" behavior as the PowerShell windows, plus the same practical features:
   - **Progress**: the `[i/totale]` counter is printed to the Listing Window (and the log file) for every STEP file.
   - **Cancel**: create a file named `CANCEL.txt` in the output folder while the batch is running — it's picked up between one STEP file and the next (never mid-export), the batch stops cleanly, and the marker file is deleted automatically. This works identically whether the PowerShell GUI or the fallback started the run, since the conversion itself never knows which one was used.
-  - **Advanced options**: right before the conversion starts, a single Yes/No dialog lets you turn the export of open (non-solid) bodies on or off for that run. The three STL tolerances stay at their configured defaults in the fallback (not worth the risk of adding more untested UI components for a niche setting) — edit the `chordalTol`/`adjacencyTol`/`angularTol` fields near the top of the source if you need to change them.
+  - **Advanced options**: right before the conversion starts, a single Yes/No dialog lets you turn the export of open (non-solid) bodies on or off for that run. Chordal and angular tolerance stay at their configured defaults in the fallback — edit the `chordalTol`/`angularTol` fields near the top of the source if you need to change them.
