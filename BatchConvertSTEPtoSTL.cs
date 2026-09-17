@@ -2293,7 +2293,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         // configurata (mai toccata), altrimenti coincide con quella
         // configurata (comportamento identico alle versioni precedenti).
         outputFolder = (decision == BatchDecision.CopyToNewFolder)
-            ? Path.Combine(configuredOutputFolder, "Export_" + DateTime.Now.ToString("yyyy-MM-dd_HHmmss"))
+            ? CreateUniqueExportFolder(configuredOutputFolder)
             : configuredOutputFolder;
         EnsureDirectory(outputFolder);
 
@@ -2660,8 +2660,9 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                     int compOkBefore = compOk;
                     int compFailedBefore = compFailed;
 
+                    List<string> indexedOccurrences = new List<string>();
                     ExportComponentTree(theSession, lw, root, totalCounts, exportedSoFar,
-                        ref compOk, ref compFailed, errLogPath, baseName, indexPath, partNameOwner,
+                        ref compOk, ref compFailed, errLogPath, baseName, indexedOccurrences, partNameOwner,
                         ref grandSolidBodies, ref grandOpenBodies, ref grandFiles, ref grandSkippedFiles);
 
                     int exportedHere = compOk - compOkBefore;
@@ -2670,6 +2671,18 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                     if (exportedHere == 0 && failedHere == 0)
                     {
                         throw new Exception("Assieme rilevato ma nessun componente con corpi trovato al suo interno.");
+                    }
+
+                    // Sostituisce lo snapshot di questo STEP una sola volta:
+                    // rieseguire lo stesso assieme non deve moltiplicare le
+                    // occorrenze nell'indice persistente.
+                    try
+                    {
+                        ReplaceComponentOccurrencesInIndex(indexPath, baseName, indexedOccurrences);
+                    }
+                    catch (Exception exIndex)
+                    {
+                        Log(lw, "  -> Avviso: indice componenti non aggiornato: " + exIndex.Message);
                     }
 
                     ok++;
@@ -2690,8 +2703,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             catch (Exception ex)
             {
                 failed++;
-                File.AppendAllText(errLogPath,
-                    string.Format("{0} - {1} - {2}{3}", DateTime.Now, stepFile, ex.Message, Environment.NewLine));
+                TryAppendErrorLog(lw, errLogPath,
+                    string.Format("{0} - {1} - {2}", DateTime.Now, stepFile, ex.Message));
                 Log(lw, "  -> ERRORE: " + ex.Message);
             }
             finally
@@ -2865,6 +2878,20 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         stepFiles.AddRange(Directory.GetFiles(folder, "*.step"));
         stepFiles.Sort();
         return stepFiles;
+    }
+
+    private static string CreateUniqueExportFolder(string parentFolder)
+    {
+        string prefix = "Export_" + DateTime.Now.ToString("yyyy-MM-dd_HHmmss");
+        string candidate = Path.Combine(parentFolder, prefix);
+        int suffix = 1;
+        while (Directory.Exists(candidate))
+        {
+            candidate = Path.Combine(parentFolder, prefix + "_" + suffix.ToString("00"));
+            suffix++;
+        }
+        Directory.CreateDirectory(candidate);
+        return candidate;
     }
 
     // Costruisce la mappa nome componente -> nome dello STEP che lo ha
@@ -3202,7 +3229,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     private static void ExportComponentTree(Session theSession, ListingWindow lw, Component comp,
         Dictionary<string, int> totalCounts, Dictionary<string, int> exportedSoFar,
         ref int compOk, ref int compFailed, string errLogPath,
-        string stepBaseName, string indexPath, Dictionary<string, string> partNameOwner,
+        string stepBaseName, List<string> indexedOccurrences, Dictionary<string, string> partNameOwner,
         ref int grandSolid, ref int grandOpen, ref int grandFiles, ref int grandSkipped)
     {
         Component[] children = comp.GetChildren();
@@ -3212,7 +3239,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             foreach (Component child in children)
             {
                 ExportComponentTree(theSession, lw, child, totalCounts, exportedSoFar,
-                    ref compOk, ref compFailed, errLogPath, stepBaseName, indexPath, partNameOwner,
+                    ref compOk, ref compFailed, errLogPath, stepBaseName, indexedOccurrences, partNameOwner,
                     ref grandSolid, ref grandOpen, ref grandFiles, ref grandSkipped);
             }
         }
@@ -3264,11 +3291,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
         string fileBaseName = BuildInstanceFileBaseName(lw, stepBaseName, partName, occ, total, partNameOwner);
 
-        // Registro questa occorrenza nell'indice: NX ha comunque generato/usato
-        // un .prt per questa Part durante l'apertura dell'assieme, quindi vale la
-        // pena tenerne traccia (con la quantita' corretta) anche se l'export
-        // STL dovesse fallire.
-        RegisterComponentOccurrenceInIndex(indexPath, stepBaseName, partName);
+        indexedOccurrences.Add(partName);
 
         Log(lw, "");
 
@@ -3316,9 +3339,9 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 throw;
             }
             compFailed++;
-            File.AppendAllText(errLogPath,
-                string.Format("{0} - componente {1} (occorrenza {2}/{3}) - {4}{5}",
-                    DateTime.Now, partName, occ, total, ex.Message, Environment.NewLine));
+            TryAppendErrorLog(lw, errLogPath,
+                string.Format("{0} - componente {1} (occorrenza {2}/{3}) - {4}",
+                    DateTime.Now, partName, occ, total, ex.Message));
             Log(lw, string.Format("     -> componente ERRORE: {0} [istanza {1}/{2}] - {3}",
                 partName, occ, total, ex.Message));
         }
@@ -3427,8 +3450,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 throw;
             }
             compFailed++;
-            File.AppendAllText(errLogPath,
-                string.Format("{0} - componente (prt diretto) {1} - {2}{3}", DateTime.Now, fileBaseName, ex.Message, Environment.NewLine));
+            TryAppendErrorLog(lw, errLogPath,
+                string.Format("{0} - componente (prt diretto) {1} - {2}", DateTime.Now, fileBaseName, ex.Message));
             Log(lw, string.Format("     -> componente ERRORE (prt diretto): {0} - {1}", fileBaseName, ex.Message));
         }
         finally
@@ -3525,19 +3548,61 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         return index;
     }
 
-    // Aggiunge SEMPRE una nuova riga per questa occorrenza (nessuna deduplica,
-    // perche' la quantita' del componente e' significativa).
-    private static void RegisterComponentOccurrenceInIndex(string indexPath, string stepBaseName, string partName)
+    // Aggiorna atomicamente lo snapshot di un singolo STEP, conservando le
+    // ripetizioni all'interno del run ma eliminando quelle accumulate da run
+    // precedenti. In questo modo la quantita' resta significativa e stabile.
+    private static void ReplaceComponentOccurrencesInIndex(string indexPath, string stepBaseName,
+        List<string> occurrences)
+    {
+        string tempPath = indexPath + ".tmp." + Guid.NewGuid().ToString("N");
+        try
+        {
+            List<string> lines = new List<string>();
+            if (File.Exists(indexPath))
+            {
+                foreach (string line in File.ReadAllLines(indexPath))
+                {
+                    string[] parts = line.Split('|');
+                    if (parts.Length == 2 && string.Equals(parts[0].Trim(), stepBaseName,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    lines.Add(line);
+                }
+            }
+            foreach (string partName in occurrences)
+            {
+                lines.Add(stepBaseName + "|" + partName);
+            }
+
+            File.WriteAllLines(tempPath, lines.ToArray(), new UTF8Encoding(false));
+            if (File.Exists(indexPath))
+            {
+                File.Replace(tempPath, indexPath, null);
+            }
+            else
+            {
+                File.Move(tempPath, indexPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); }
+            catch (Exception) { }
+            throw new IOException("Impossibile aggiornare l'indice componenti: " + ex.Message, ex);
+        }
+    }
+
+    private static void TryAppendErrorLog(ListingWindow lw, string path, string message)
     {
         try
         {
-            File.AppendAllText(indexPath, stepBaseName + "|" + partName + Environment.NewLine);
+            File.AppendAllText(path, message + Environment.NewLine);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // se la scrittura dell'indice fallisce non blocchiamo l'esportazione:
-            // nel peggiore dei casi la prossima esecuzione non trovera' questa voce
-            // e ritentera' l'apertura normale dello STEP.
+            Log(lw, "  -> Avviso: impossibile aggiornare il log errori: " + ex.Message);
         }
     }
 
