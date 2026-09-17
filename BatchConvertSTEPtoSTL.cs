@@ -284,7 +284,7 @@ using System.Windows.Forms;
 using NXOpen;
 using NXOpen.Assemblies;
 
-public enum BatchDecision { Stop, Overwrite, CopyToNewFolder }
+public enum BatchDecision { Stop, PreserveExisting, Overwrite, CopyToNewFolder }
 
 // Riga di riepilogo della scansione preventiva, per un singolo file STEP.
 internal class ScanRow
@@ -1639,7 +1639,11 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 Log(lw, string.Format(
                     "Scansione: {0} file STEP, nessun conflitto rilevato. Procedo automaticamente, senza chiedere altro.",
                     summary.TotalSteps));
-                return BatchDecision.Overwrite;
+                // Una scansione senza conflitti noti non equivale al consenso a
+                // sovrascrivere: per gli STEP nuovi non conosciamo ancora i nomi
+                // dei componenti interni. Eventuali collisioni scoperte durante
+                // l'export devono quindi essere saltate in modo conservativo.
+                return BatchDecision.PreserveExisting;
             }
 
             File.WriteAllLines(Path.Combine(workDir, "decision_input.txt"), BuildScanSummaryLines(summary));
@@ -2094,7 +2098,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 "Scansione: {0} file STEP, nessun conflitto rilevato. Procedo automaticamente, senza chiedere altro.",
                 summary.TotalSteps));
             AskExportNotClosedToggle(lw);
-            return BatchDecision.Overwrite;
+            return BatchDecision.PreserveExisting;
         }
 
         DialogResult modeResult = MessageBox.Show(
@@ -2325,9 +2329,13 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         {
             Log(lw, "Modalita' scelta: COPIA IN NUOVA CARTELLA. Tutto l'output di questo run va in: " + outputFolder);
         }
-        else
+        else if (decision == BatchDecision.Overwrite)
         {
             Log(lw, "Modalita' scelta: SOVRASCRIVI. Gli output gia' esistenti rilevati dalla scansione verranno sovrascritti.");
+        }
+        else
+        {
+            Log(lw, "Modalita' automatica sicura: nessun conflitto noto; eventuali output esistenti scoperti durante l'export non verranno sovrascritti.");
         }
 
         string errLogPath = Path.Combine(outputFolder, "errori_conversione.log");
@@ -2551,14 +2559,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 // primo file aperto nella sessione, quando non c'e' ancora una Work part):
                 // ApplicationSwitchImmediate pero' richiede una Work part valida, quindi
                 // va impostata esplicitamente se OpenActiveDisplay non l'ha gia' fatto.
-                Part workPart = theSession.Parts.Work;
-                if (workPart == null)
+                Part workPart = basePart1 as Part;
+                if (workPart != null && theSession.Parts.Work != workPart)
                 {
-                    workPart = basePart1 as Part;
-                    if (workPart != null)
-                    {
-                        theSession.Parts.SetWork(workPart);
-                    }
+                    theSession.Parts.SetWork(workPart);
                 }
                 if (workPart == null)
                 {
@@ -2759,7 +2763,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         result.InputFolder = inputFolder;
         result.Mode = decision == BatchDecision.CopyToNewFolder
             ? "Copia in nuova cartella"
-            : "Sovrascrittura automatica";
+            : (decision == BatchDecision.Overwrite ? "Sovrascrittura autorizzata" : "Conserva output esistenti");
         result.Steps = stepResults;
         return result;
     }
@@ -3347,14 +3351,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             // Vedi commento equivalente sull'apertura dello STEP: AllowAdditional non
             // garantisce che la parte aperta diventi anche la Work part, che invece
             // serve ad ApplicationSwitchImmediate.
-            Part workPart = theSession.Parts.Work;
-            if (workPart == null)
+            Part workPart = basePart1 as Part;
+            if (workPart != null && theSession.Parts.Work != workPart)
             {
-                workPart = basePart1 as Part;
-                if (workPart != null)
-                {
-                    theSession.Parts.SetWork(workPart);
-                }
+                theSession.Parts.SetWork(workPart);
             }
             if (workPart == null)
             {
