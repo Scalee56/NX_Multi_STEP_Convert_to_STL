@@ -284,7 +284,8 @@ using System.Windows.Forms;
 using NXOpen;
 using NXOpen.Assemblies;
 
-public enum BatchDecision { Stop, Overwrite, CopyToNewFolder }
+public enum BatchDecision { Stop, PreserveExisting, Overwrite, CopyToNewFolder }
+public enum MeshExportFormat { Stl, ThreeMf }
 
 // Riga di riepilogo della scansione preventiva, per un singolo file STEP.
 internal class ScanRow
@@ -339,6 +340,18 @@ public class NXJournal
     // false = i corpi non solidi vengono ignorati
     // Anche questo modificabile dal pannello "Opzioni avanzate".
     internal static bool exportNotClosedMeshes = true;
+    internal static bool generateComponentReport = false;
+    internal static MeshExportFormat meshExportFormat = MeshExportFormat.Stl;
+
+    private static string OutputExtension
+    {
+        get { return meshExportFormat == MeshExportFormat.ThreeMf ? ".3mf" : ".stl"; }
+    }
+
+    private static string OutputFormatLabel
+    {
+        get { return meshExportFormat == MeshExportFormat.ThreeMf ? "3MF" : "STL"; }
+    }
 
     // La generazione della preview forza NX a renderizzare e scrivere un JPG.
     // Su batch/server e assiemi con molte occorrenze il costo e' sensibile;
@@ -453,14 +466,32 @@ public class NXJournal
         public string GroupFolder;
     }
 
+    internal class ComponentReportRow
+    {
+        public string Name;
+        public int Quantity;
+        public double SizeX;
+        public double SizeY;
+        public double SizeZ;
+        public double Volume;
+        public string Unit;
+        public string VolumeUnit;
+        public string Note;
+        public string ImagePath;
+    }
+
+    private static Dictionary<string, ComponentReportRow> componentReportRows =
+        new Dictionary<string, ComponentReportRow>(StringComparer.OrdinalIgnoreCase);
+
     // Applica le opzioni scelte nel pannello "Opzioni avanzate" della GUI
     // (o i valori di default, se il pannello non e' mai stato aperto) prima
     // di avviare una conversione.
-    internal static void ApplyAdvancedOptions(double chordal, double angular, bool exportOpenBodies)
+    internal static void ApplyAdvancedOptions(double chordal, double angular, bool exportOpenBodies, bool generateReport)
     {
         chordalTol = chordal;
         angularTol = angular;
         exportNotClosedMeshes = exportOpenBodies;
+        generateComponentReport = generateReport;
     }
 
     public static void Main(string[] args)
@@ -469,7 +500,7 @@ public class NXJournal
         ListingWindow lw = theSession.ListingWindow;
         lw.Open();
 
-        Log(lw, "=== Avvio conversione batch STEP -> STL (v15) ===");
+        Log(lw, "=== Avvio conversione batch STEP -> mesh (STL/3MF) ===");
 
         // Percorso preferito: GUI vera mostrata da un processo powershell.exe
         // separato (vedi RunExternalGuiFlow) - configurazione cartelle,
@@ -790,9 +821,25 @@ $cfg = Read-KeyValueFile $configInputFile
 # finestra principale NX, poi le ripristina insieme.
 Add-Type @""
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public static class NxWindowControl {
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    private delegate void WinEventDelegate(IntPtr hook, uint eventType, IntPtr hWnd, int objectId, int childId, uint threadId, uint eventTime);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct WINDOWPLACEMENT {
+        public int length; public int flags; public int showCmd;
+        public int minX; public int minY; public int maxX; public int maxY;
+        public int left; public int top; public int right; public int bottom;
+    }
+    private static readonly object Sync = new object();
+    private static readonly Dictionary<IntPtr, WINDOWPLACEMENT> Saved = new Dictionary<IntPtr, WINDOWPLACEMENT>();
+    private static WinEventDelegate eventCallback = OnWindowEvent;
+    private static IntPtr foregroundHook = IntPtr.Zero;
+    private static IntPtr showHook = IntPtr.Zero;
+    private static IntPtr dialogHook = IntPtr.Zero;
+    private static int hiddenProcessId;
+    private static bool backgroundMode;
     [DllImport(""user32.dll"")]
     private static extern bool EnumWindows(EnumWindowsProc callback, IntPtr lParam);
     [DllImport(""user32.dll"")]
@@ -803,6 +850,30 @@ public static class NxWindowControl {
     public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
     [DllImport(""user32.dll"")]
     public static extern bool PostMessage(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam);
+    [DllImport(""user32.dll"")]
+    private static extern bool IsWindow(IntPtr hWnd);
+    [DllImport(""user32.dll"")]
+    private static extern IntPtr GetAncestor(IntPtr hWnd, uint flags);
+    [DllImport(""user32.dll"")]
+    private static extern bool GetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT placement);
+    [DllImport(""user32.dll"")]
+    private static extern bool SetWindowPlacement(IntPtr hWnd, ref WINDOWPLACEMENT placement);
+    [DllImport(""user32.dll"")]
+    private static extern bool SetWindowPos(IntPtr hWnd, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
+    [DllImport(""user32.dll"")]
+    private static extern IntPtr SetWinEventHook(uint eventMin, uint eventMax, IntPtr module, WinEventDelegate callback, uint processId, uint threadId, uint flags);
+    [DllImport(""user32.dll"")]
+    private static extern bool UnhookWinEvent(IntPtr hook);
+
+    private const int SW_HIDE = 0;
+    private const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    private const uint EVENT_SYSTEM_DIALOGSTART = 0x0010;
+    private const uint EVENT_OBJECT_SHOW = 0x8002;
+    private const uint WINEVENT_OUTOFCONTEXT = 0;
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOZORDER = 0x0004;
+    private const uint SWP_NOACTIVATE = 0x0010;
+    private const uint GA_ROOT = 2;
 
     public static void SetProcessWindowsState(int processId, int command) {
         EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
@@ -825,21 +896,90 @@ public static class NxWindowControl {
             return true;
         }, IntPtr.Zero);
     }
+
+    public static void StartBackgroundMode(int processId) {
+        lock (Sync) {
+            if (backgroundMode) return;
+            hiddenProcessId = processId;
+            backgroundMode = true;
+            EnumWindows(delegate(IntPtr hWnd, IntPtr lParam) {
+                HideOwnedWindow(hWnd);
+                return true;
+            }, IntPtr.Zero);
+            foregroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND,
+                IntPtr.Zero, eventCallback, (uint)processId, 0, WINEVENT_OUTOFCONTEXT);
+            showHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW,
+                IntPtr.Zero, eventCallback, (uint)processId, 0, WINEVENT_OUTOFCONTEXT);
+            dialogHook = SetWinEventHook(EVENT_SYSTEM_DIALOGSTART, EVENT_SYSTEM_DIALOGSTART,
+                IntPtr.Zero, eventCallback, (uint)processId, 0, WINEVENT_OUTOFCONTEXT);
+        }
+    }
+
+    public static void StopBackgroundMode() {
+        lock (Sync) {
+            backgroundMode = false;
+            if (foregroundHook != IntPtr.Zero) { UnhookWinEvent(foregroundHook); foregroundHook = IntPtr.Zero; }
+            if (showHook != IntPtr.Zero) { UnhookWinEvent(showHook); showHook = IntPtr.Zero; }
+            if (dialogHook != IntPtr.Zero) { UnhookWinEvent(dialogHook); dialogHook = IntPtr.Zero; }
+            foreach (KeyValuePair<IntPtr, WINDOWPLACEMENT> item in Saved) {
+                if (!IsWindow(item.Key)) continue;
+                WINDOWPLACEMENT placement = item.Value;
+                SetWindowPlacement(item.Key, ref placement);
+                ShowWindowAsync(item.Key, placement.showCmd);
+            }
+            Saved.Clear();
+            hiddenProcessId = 0;
+        }
+    }
+
+    private static void OnWindowEvent(IntPtr hook, uint eventType, IntPtr hWnd,
+        int objectId, int childId, uint threadId, uint eventTime) {
+        if (!backgroundMode || hWnd == IntPtr.Zero) return;
+        // EVENT_OBJECT_SHOW puo' riferirsi al client/figlio del popup
+        // Information invece che alla top-level window (objectId non e' sempre
+        // OBJID_WINDOW). Risaliamo sempre alla root e nascondiamo quella.
+        IntPtr root = GetAncestor(hWnd, GA_ROOT);
+        HideOwnedWindow(root == IntPtr.Zero ? hWnd : root);
+    }
+
+    private static void HideOwnedWindow(IntPtr hWnd) {
+        lock (Sync) {
+            if (!backgroundMode) return;
+            uint ownerProcessId;
+            GetWindowThreadProcessId(hWnd, out ownerProcessId);
+            if (ownerProcessId != (uint)hiddenProcessId) return;
+            if (!Saved.ContainsKey(hWnd)) {
+                WINDOWPLACEMENT placement = new WINDOWPLACEMENT();
+                placement.length = Marshal.SizeOf(typeof(WINDOWPLACEMENT));
+                if (GetWindowPlacement(hWnd, ref placement)) Saved[hWnd] = placement;
+            }
+            // Off-screen prima e SW_HIDE subito dopo: anche se NX prova a
+            // riattivarsi durante OpenActiveDisplay non puo' apparire né rubare focus.
+            SetWindowPos(hWnd, IntPtr.Zero, -32000, -32000, 0, 0,
+                SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            ShowWindowAsync(hWnd, SW_HIDE);
+        }
+    }
 }
 ""@
 $script:nxProcessId = 0
 [int]::TryParse($cfg[""NxProcessId""], [ref]$script:nxProcessId) | Out-Null
-$script:minimizedNxWithGui = $false
+$script:hiddenNxWithGui = $false
+$script:keepNxHiddenDuringExport = $false
 $form.Add_Resize({
     if ($script:nxProcessId -le 0) { return }
+    if ($script:keepNxHiddenDuringExport) { return }
     try {
         Get-Process -Id $script:nxProcessId -ErrorAction Stop | Out-Null
         if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
-            [NxWindowControl]::SetProcessWindowsState($script:nxProcessId, 6)
-            $script:minimizedNxWithGui = $true
-        } elseif ($script:minimizedNxWithGui -and $form.WindowState -eq [System.Windows.Forms.FormWindowState]::Normal) {
-            [NxWindowControl]::SetProcessWindowsState($script:nxProcessId, 9)
-            $script:minimizedNxWithGui = $false
+            # Lo stesso background mode del pulsante Nascondi NX: anche il
+            # normale tasto riduci nasconde NX, Information e futuri popup.
+            [NxWindowControl]::StartBackgroundMode($script:nxProcessId)
+            $script:hiddenNxWithGui = $true
+        } elseif ($script:hiddenNxWithGui -and
+                  $form.WindowState -eq [System.Windows.Forms.FormWindowState]::Normal) {
+            [NxWindowControl]::StopBackgroundMode()
+            $script:hiddenNxWithGui = $false
         }
     } catch {}
 })
@@ -851,17 +991,21 @@ $pnlConfig.BackColor = $ClrWindowBg
 $form.Controls.Add($pnlConfig)
 
 $lblTitleConfig = New-Object System.Windows.Forms.Label
-$lblTitleConfig.Text = ""Conversione batch STEP -> STL""
+$lblTitleConfig.Text = ""Conversione batch STEP -> mesh""
 $lblTitleConfig.SetBounds(24, 20, 650, 30)
 Style-TitleLabel $lblTitleConfig
 $pnlConfig.Controls.Add($lblTitleConfig)
 
-$cardCartelle = Add-Card $pnlConfig 14 66 620 178
+$cardCartelle = Add-Card $pnlConfig 14 66 620 212
 
 $lblIn = New-Object System.Windows.Forms.Label
 $lblIn.Text = ""Cartella di input (file STEP):""
 $lblIn.SetBounds(24, 74, 580, 20)
 Style-Label $lblIn
+# Queste label sono sorelle della card, non sue figlie: in WinForms il
+# Transparent mostra il colore del parent ($pnlConfig), non del controllo
+# fratello sottostante. Impostiamo quindi esplicitamente il bianco della card.
+$lblIn.BackColor = $ClrCardBg
 $pnlConfig.Controls.Add($lblIn)
 
 $txtIn = New-Object System.Windows.Forms.TextBox
@@ -882,9 +1026,10 @@ $btnBrowseIn.Add_Click({
 })
 
 $lblOut = New-Object System.Windows.Forms.Label
-$lblOut.Text = ""Cartella di output (file STL):""
+$lblOut.Text = ""Cartella di output:""
 $lblOut.SetBounds(24, 138, 580, 20)
 Style-Label $lblOut
+$lblOut.BackColor = $ClrCardBg
 $pnlConfig.Controls.Add($lblOut)
 
 $txtOut = New-Object System.Windows.Forms.TextBox
@@ -904,22 +1049,38 @@ $btnBrowseOut.Add_Click({
     if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtOut.Text = $dlg.SelectedPath }
 })
 
+$lblFormat = New-Object System.Windows.Forms.Label
+$lblFormat.Text = ""Formato mesh di output:""
+$lblFormat.SetBounds(24, 198, 190, 24)
+Style-Label $lblFormat
+$lblFormat.BackColor = $ClrCardBg
+$pnlConfig.Controls.Add($lblFormat)
+
+$cmbFormat = New-Object System.Windows.Forms.ComboBox
+$cmbFormat.DropDownStyle = [System.Windows.Forms.ComboBoxStyle]::DropDownList
+$cmbFormat.SetBounds(220, 196, 120, 26)
+[void]$cmbFormat.Items.Add(""STL"")
+[void]$cmbFormat.Items.Add(""3MF"")
+$cmbFormat.SelectedItem = if ($cfg[""ExportFormat""] -eq ""3MF"") { ""3MF"" } else { ""STL"" }
+$pnlConfig.Controls.Add($cmbFormat)
+
 $lblInfo = New-Object System.Windows.Forms.Label
-$lblInfo.Text = ""La scansione confronta i file STEP di input con gli STL gia' presenti in output, senza aprire NX. Se non trova conflitti la conversione parte subito.""
-$lblInfo.SetBounds(24, 198, 600, 40)
+$lblInfo.Text = ""La scansione confronta i file STEP di input con le mesh gia' presenti in output, senza aprire NX. Se non trova conflitti la conversione parte subito.""
+$lblInfo.SetBounds(24, 230, 600, 40)
 Style-SubLabel $lblInfo
+$lblInfo.BackColor = $ClrCardBg
 $pnlConfig.Controls.Add($lblInfo)
 
 $cardCartelle.SendToBack()
 
 $chkAdvanced = New-Object System.Windows.Forms.CheckBox
-$chkAdvanced.Text = ""Mostra opzioni avanzate (tolleranze STL, superfici non chiuse)""
-$chkAdvanced.SetBounds(24, 254, 500, 24)
+$chkAdvanced.Text = ""Mostra opzioni avanzate (tolleranze mesh, superfici non chiuse)""
+$chkAdvanced.SetBounds(24, 286, 500, 24)
 Style-CheckBox $chkAdvanced
 $pnlConfig.Controls.Add($chkAdvanced)
 
 $panelAdv = New-Object System.Windows.Forms.Panel
-$panelAdv.SetBounds(24, 284, 610, 140)
+$panelAdv.SetBounds(24, 316, 610, 140)
 $panelAdv.Visible = $false
 $panelAdv.BackColor = $ClrCardBg
 $panelAdv.Region = New-RoundedRegion $panelAdv.Width $panelAdv.Height 12
@@ -964,17 +1125,24 @@ $chkExportOpen.Checked = ($cfg[""ExportNotClosed""] -ne ""0"")
 Style-CheckBox $chkExportOpen
 $panelAdv.Controls.Add($chkExportOpen)
 
+$chkGenerateReport = New-Object System.Windows.Forms.CheckBox
+$chkGenerateReport.Text = ""Genera report Excel con immagini, bounding box e volume""
+$chkGenerateReport.SetBounds(14, 108, 520, 22)
+$chkGenerateReport.Checked = ($cfg[""GenerateReport""] -eq ""1"")
+Style-CheckBox $chkGenerateReport
+$panelAdv.Controls.Add($chkGenerateReport)
+
 $chkAdvanced.Add_CheckedChanged({ $panelAdv.Visible = $chkAdvanced.Checked })
 
 $btnScanConfig = New-Object System.Windows.Forms.Button
 $btnScanConfig.Text = ""Avvia scansione""
-$btnScanConfig.SetBounds(24, 456, 210, 44)
+$btnScanConfig.SetBounds(24, 488, 210, 44)
 $pnlConfig.Controls.Add($btnScanConfig)
 Style-PrimaryButton $btnScanConfig
 
 $btnCancelConfig = New-Object System.Windows.Forms.Button
 $btnCancelConfig.Text = ""Annulla""
-$btnCancelConfig.SetBounds(466, 456, 210, 44)
+$btnCancelConfig.SetBounds(466, 488, 210, 44)
 $pnlConfig.Controls.Add($btnCancelConfig)
 Style-SecondaryButton $btnCancelConfig
 
@@ -1039,9 +1207,11 @@ $btnScanConfig.Add_Click({
     $out[""Cancelled""] = ""0""
     $out[""InputFolder""] = $txtIn.Text
     $out[""OutputFolder""] = $txtOut.Text
+    $out[""ExportFormat""] = [string]$cmbFormat.SelectedItem
     $out[""ChordalTol""] = $numChordal.Value.ToString($ic)
     $out[""AngularTol""] = $numAng.Value.ToString($ic)
     $out[""ExportNotClosed""] = if ($chkExportOpen.Checked) { ""1"" } else { ""0"" }
+    $out[""GenerateReport""] = if ($chkGenerateReport.Checked) { ""1"" } else { ""0"" }
     Write-KeyValueFile (Join-Path $WorkDir ""config_output.txt"") $out
     Show-Waiting ""Scansione dei conflitti in corso...""
 })
@@ -1116,7 +1286,7 @@ $pnlProgress.Visible = $false
 $form.Controls.Add($pnlProgress)
 
 $lblTitleProgress = New-Object System.Windows.Forms.Label
-$lblTitleProgress.Text = ""Conversione STEP -> STL in corso""
+$lblTitleProgress.Text = ""Conversione STEP -> mesh in corso""
 $lblTitleProgress.SetBounds(24, 20, 260, 30)
 Style-TitleLabel $lblTitleProgress
 $pnlProgress.Controls.Add($lblTitleProgress)
@@ -1244,13 +1414,16 @@ $btnCancelProgress.Add_Click({
 })
 
 $btnMinimizeNx = New-Object System.Windows.Forms.Button
-$btnMinimizeNx.Text = ""Riduci NX""
+$btnMinimizeNx.Text = ""Nascondi NX""
 $btnMinimizeNx.SetBounds(200, 258, 155, 40)
 $pnlProgress.Controls.Add($btnMinimizeNx)
 Style-SecondaryButton $btnMinimizeNx
 $btnMinimizeNx.Add_Click({
     if ($script:nxProcessId -gt 0) {
-        try { [NxWindowControl]::SetProcessWindowsState($script:nxProcessId, 6) } catch {}
+        $script:keepNxHiddenDuringExport = $true
+        $btnMinimizeNx.Enabled = $false
+        $btnMinimizeNx.Text = ""NX in background""
+        try { [NxWindowControl]::StartBackgroundMode($script:nxProcessId) } catch {}
     }
 })
 
@@ -1402,17 +1575,6 @@ $pnlSummary.Controls.Add($btnClose)
 Style-PrimaryButton $btnClose
 $btnClose.Add_Click({ $form.Close() })
 
-$btnMinimizeNxFinal = New-Object System.Windows.Forms.Button
-$btnMinimizeNxFinal.Text = ""Riduci NX""
-$btnMinimizeNxFinal.SetBounds(266, 368, 136, 42)
-$pnlSummary.Controls.Add($btnMinimizeNxFinal)
-Style-SecondaryButton $btnMinimizeNxFinal
-$btnMinimizeNxFinal.Add_Click({
-    if ($script:nxProcessId -gt 0) {
-        try { [NxWindowControl]::SetProcessWindowsState($script:nxProcessId, 6) } catch {}
-    }
-})
-
 # --- Orchestratore: sorveglia ""next_stage.txt"", scritto dal journal C# per
 # dire alla finestra (attualmente sul pannello Attesa) quale pannello
 # mostrare quando ha finito di calcolare la fase successiva. -----------------
@@ -1468,6 +1630,8 @@ $orchTimer.Add_Tick({
         $script:cancelRequested = $false
         $btnCancelProgress.Enabled = $true
         $btnCancelProgress.Text = ""Annulla""
+        $btnMinimizeNx.Enabled = $true
+        $btnMinimizeNx.Text = ""Nascondi NX""
 
         $pnlConfig.Visible = $false
         $pnlWaiting.Visible = $false
@@ -1493,6 +1657,17 @@ $orchTimer.Add_Tick({
         $progressPollTimer.Stop()
         $progressRenderTimer.Stop()
         $progressSpinnerTimer.Stop()
+        # Se l'utente aveva ridotto la GUI, il completamento deve essere
+        # immediatamente visibile senza dover cercare l'icona nella taskbar.
+        if ($form.WindowState -eq [System.Windows.Forms.FormWindowState]::Minimized) {
+            $form.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+        }
+        # Ripristina posizione e stato originali di tutte le finestre NX.
+        if ($script:keepNxHiddenDuringExport) {
+            try { [NxWindowControl]::StopBackgroundMode() } catch {}
+        }
+        $script:keepNxHiddenDuringExport = $false
+        $script:hiddenNxWithGui = $false
         if ($picPreview.Image) { $picPreview.Image.Dispose(); $picPreview.Image = $null }
         $summaryInputFile = Join-Path $WorkDir ""summary_input.txt""
         $summaryText2 = """"
@@ -1521,6 +1696,9 @@ $orchTimer.Add_Tick({
         $form.AcceptButton = $btnClose
         $form.CancelButton = $null
         Center-Form $form 620 460
+        $form.Show()
+        $form.BringToFront()
+        $form.Activate()
         Set-Content -LiteralPath (Join-Path $WorkDir ""summary_shown.txt"") -Value ""shown"" -Encoding UTF8
     }
 })
@@ -1532,7 +1710,7 @@ $orchTimer.Start()
 $pnlConfig.Visible = $true
 $form.AcceptButton = $btnScanConfig
 $form.CancelButton = $btnCancelConfig
-Center-Form $form 720 580
+Center-Form $form 720 620
 Enable-FadeIn $form
 
 # Senza questo, il primo campo di testo riceve il focus all'apertura
@@ -1544,9 +1722,20 @@ $form.Add_FormClosing({
     if ($pnlProgress.Visible -and -not $script:doneReceived) {
         Request-ProgressCancel
     }
+    if ($script:keepNxHiddenDuringExport) {
+        try { [NxWindowControl]::StopBackgroundMode() } catch {}
+        $script:keepNxHiddenDuringExport = $false
+    }
+    if ($script:hiddenNxWithGui) {
+        try { [NxWindowControl]::StopBackgroundMode() } catch {}
+        $script:hiddenNxWithGui = $false
+    }
 })
 
 [void]$form.ShowDialog()
+
+# Ultima rete di sicurezza: nessuna uscita della GUI deve lasciare NX nascosto.
+try { [NxWindowControl]::StopBackgroundMode() } catch {}
 
 $orchTimer.Stop()
 $orchTimer.Dispose()
@@ -1587,6 +1776,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         configInput["ChordalTol"] = chordalTol.ToString(CultureInfo.InvariantCulture);
         configInput["AngularTol"] = angularTol.ToString(CultureInfo.InvariantCulture);
         configInput["ExportNotClosed"] = exportNotClosedMeshes ? "1" : "0";
+        configInput["GenerateReport"] = generateComponentReport ? "1" : "0";
+        configInput["ExportFormat"] = OutputFormatLabel;
         WriteKeyValueFile(Path.Combine(workDir, "config_input.txt"), configInput);
 
         externalGuiProcess = StartPersistentExternalGui(scriptPath, workDir);
@@ -1622,10 +1813,14 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             configuredOutputFolder = chosenOutputFolder;
             EnsureDirectory(configuredOutputFolder);
 
+            meshExportFormat = string.Equals(GetOrDefault(configOutput, "ExportFormat", "STL"), "3MF",
+                StringComparison.OrdinalIgnoreCase) ? MeshExportFormat.ThreeMf : MeshExportFormat.Stl;
+
             ApplyAdvancedOptions(
                 ParseInvariantDouble(configOutput, "ChordalTol", chordalTol),
                 ParseInvariantDouble(configOutput, "AngularTol", angularTol),
-                GetFlag(configOutput, "ExportNotClosed"));
+                GetFlag(configOutput, "ExportNotClosed"),
+                GetFlag(configOutput, "GenerateReport"));
 
             // Da qui in poi la finestra e' gia' sul pannello "Attesa" (l'ha
             // mostrato lei stessa subito dopo aver scritto config_output.txt):
@@ -1639,7 +1834,11 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 Log(lw, string.Format(
                     "Scansione: {0} file STEP, nessun conflitto rilevato. Procedo automaticamente, senza chiedere altro.",
                     summary.TotalSteps));
-                return BatchDecision.Overwrite;
+                // Una scansione senza conflitti noti non equivale al consenso a
+                // sovrascrivere: per gli STEP nuovi non conosciamo ancora i nomi
+                // dei componenti interni. Eventuali collisioni scoperte durante
+                // l'export devono quindi essere saltate in modo conservativo.
+                return BatchDecision.PreserveExisting;
             }
 
             File.WriteAllLines(Path.Combine(workDir, "decision_input.txt"), BuildScanSummaryLines(summary));
@@ -1732,8 +1931,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 result.TotalSteps, result.Ok, result.Failed));
             lines.Add(string.Format("Componenti da assiemi: {0} riusciti, {1} falliti.",
                 result.CompOk, result.CompFailed));
-            lines.Add(string.Format("File STL scritti: {0} ({1} corpi solidi, {2} corpi non chiusi).",
-                result.GrandFiles, result.GrandSolidBodies, result.GrandOpenBodies));
+            lines.Add(string.Format("File {0} scritti: {1} ({2} corpi solidi, {3} corpi non chiusi).",
+                OutputFormatLabel, result.GrandFiles, result.GrandSolidBodies, result.GrandOpenBodies));
             if (result.GrandSkippedFiles > 0)
             {
                 lines.Add(string.Format("File saltati perche' gia' esistenti: {0}.", result.GrandSkippedFiles));
@@ -1755,7 +1954,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             // finestra: il journal puo' terminare mentre il riepilogo resta
             // consultabile come finestra indipendente.
             string summaryShownPath = Path.Combine(externalGuiWorkDir, "summary_shown.txt");
-            WaitForFileOrProcessExit(externalGuiProcess, summaryShownPath, "Summary");
+            WaitForFileOrProcessExit(externalGuiProcess, summaryShownPath, "Summary", 30000);
         }
         catch (Exception ex)
         {
@@ -1831,13 +2030,19 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     // nel frattempo (es. l'utente ha chiuso la finestra con la X, o
     // PowerShell e' crashato): in tal caso il file non arrivera' mai, quindi
     // si segnala subito l'errore invece di restare in attesa per sempre.
-    private static void WaitForFileOrProcessExit(Process process, string expectedFile, string stageName)
+    private static void WaitForFileOrProcessExit(Process process, string expectedFile, string stageName,
+        int timeoutMilliseconds = 0)
     {
+        Stopwatch waitTimer = Stopwatch.StartNew();
         while (!File.Exists(expectedFile))
         {
             if (process.HasExited)
             {
                 throw new Exception("La GUI esterna si e' chiusa senza produrre il file di risposta atteso per lo stage " + stageName + ".");
+            }
+            if (timeoutMilliseconds > 0 && waitTimer.ElapsedMilliseconds >= timeoutMilliseconds)
+            {
+                throw new TimeoutException("Timeout durante l'attesa della risposta GUI per lo stage " + stageName + ".");
             }
             System.Threading.Thread.Sleep(150);
         }
@@ -1960,7 +2165,24 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         {
             lines.Add(kv.Key + "=" + kv.Value);
         }
-        File.WriteAllLines(path, lines.ToArray(), new UTF8Encoding(false));
+        string tempPath = path + ".tmp." + Guid.NewGuid().ToString("N");
+        try
+        {
+            File.WriteAllLines(tempPath, lines.ToArray(), new UTF8Encoding(false));
+            if (File.Exists(path))
+            {
+                File.Replace(tempPath, path, null);
+            }
+            else
+            {
+                File.Move(tempPath, path);
+            }
+        }
+        finally
+        {
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); }
+            catch (Exception) { }
+        }
     }
 
     private static Dictionary<string, string> ReadKeyValueFile(string path)
@@ -2048,6 +2270,15 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     // sono conflitti si procede direttamente, senza altre interruzioni.
     private static BatchDecision RunFallbackFlow(ListingWindow lw)
     {
+        DialogResult formatChoice = MessageBox.Show(
+            "Scegli il formato mesh di output.\n\nSi' = STL\nNo = 3MF\nAnnulla = interrompi",
+            "Formato di esportazione", MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+        if (formatChoice == DialogResult.Cancel)
+        {
+            return BatchDecision.Stop;
+        }
+        meshExportFormat = formatChoice == DialogResult.No ? MeshExportFormat.ThreeMf : MeshExportFormat.Stl;
+
         string chosenInputFolder = AskForFolder("INPUT (i file .stp/.step da convertire)", inputFolder);
         if (chosenInputFolder == null)
         {
@@ -2056,7 +2287,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
         inputFolder = chosenInputFolder;
 
-        string chosenOutputFolder = AskForFolder("OUTPUT (dove finiranno i file .stl)", configuredOutputFolder);
+        string chosenOutputFolder = AskForFolder("OUTPUT (dove finiranno i file " + OutputExtension + ")", configuredOutputFolder);
         if (chosenOutputFolder == null)
         {
             Log(lw, "Interrotto dall'utente durante la scelta della cartella di output. Nessun file scritto.");
@@ -2094,7 +2325,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 "Scansione: {0} file STEP, nessun conflitto rilevato. Procedo automaticamente, senza chiedere altro.",
                 summary.TotalSteps));
             AskExportNotClosedToggle(lw);
-            return BatchDecision.Overwrite;
+            return BatchDecision.PreserveExisting;
         }
 
         DialogResult modeResult = MessageBox.Show(
@@ -2128,6 +2359,12 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             "Corpi non chiusi", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
         exportNotClosedMeshes = (result == DialogResult.Yes);
         Log(lw, "Export corpi non chiusi: " + (exportNotClosedMeshes ? "attivo" : "disattivato"));
+
+        DialogResult reportResult = MessageBox.Show(
+            "Generare report_componenti.xlsx con immagini, quantita', bounding box e volume dei singoli componenti?",
+            "Report componenti", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        generateComponentReport = (reportResult == DialogResult.Yes);
+        Log(lw, "Report componenti: " + (generateComponentReport ? "attivo" : "disattivato"));
     }
 
     // Selettore di cartella diretto: nessuna domanda preliminare "usare
@@ -2289,12 +2526,13 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         // configurata (mai toccata), altrimenti coincide con quella
         // configurata (comportamento identico alle versioni precedenti).
         outputFolder = (decision == BatchDecision.CopyToNewFolder)
-            ? Path.Combine(configuredOutputFolder, "Export_" + DateTime.Now.ToString("yyyy-MM-dd_HHmmss"))
+            ? CreateUniqueExportFolder(configuredOutputFolder)
             : configuredOutputFolder;
         EnsureDirectory(outputFolder);
 
         allowOverwrite = (decision == BatchDecision.Overwrite);
         writtenThisRun.Clear();
+        componentReportRows.Clear();
 
         // Ora che la cartella di output effettiva esiste, si puo' iniziare a
         // scrivere il log in modo incrementale (vedi Log()). Il file viene
@@ -2325,9 +2563,13 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         {
             Log(lw, "Modalita' scelta: COPIA IN NUOVA CARTELLA. Tutto l'output di questo run va in: " + outputFolder);
         }
-        else
+        else if (decision == BatchDecision.Overwrite)
         {
             Log(lw, "Modalita' scelta: SOVRASCRIVI. Gli output gia' esistenti rilevati dalla scansione verranno sovrascritti.");
+        }
+        else
+        {
+            Log(lw, "Modalita' automatica sicura: nessun conflitto noto; eventuali output esistenti scoperti durante l'export non verranno sovrascritti.");
         }
 
         string errLogPath = Path.Combine(outputFolder, "errori_conversione.log");
@@ -2344,7 +2586,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         List<string> stepFiles = GetSortedStepFiles(inputFolder);
 
         Log(lw, string.Format("Trovati {0} file STEP da convertire in: {1}", stepFiles.Count, inputFolder));
-        Log(lw, string.Format("Output STL in: {0}", outputFolder));
+        Log(lw, string.Format("Output {0} in: {1}", OutputFormatLabel, outputFolder));
 
         // Meccanismo di annullamento cooperativo, valido indipendentemente da
         // quale GUI ha avviato il run: creando un file marker con questo nome
@@ -2551,14 +2793,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 // primo file aperto nella sessione, quando non c'e' ancora una Work part):
                 // ApplicationSwitchImmediate pero' richiede una Work part valida, quindi
                 // va impostata esplicitamente se OpenActiveDisplay non l'ha gia' fatto.
-                Part workPart = theSession.Parts.Work;
-                if (workPart == null)
+                Part workPart = basePart1 as Part;
+                if (workPart != null && theSession.Parts.Work != workPart)
                 {
-                    workPart = basePart1 as Part;
-                    if (workPart != null)
-                    {
-                        theSession.Parts.SetWork(workPart);
-                    }
+                    theSession.Parts.SetWork(workPart);
                 }
                 if (workPart == null)
                 {
@@ -2587,6 +2825,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
                 int totalBodies = solidBodies.Count + openBodies.Count;
 
+                CollectComponentReportData(theSession, baseName, baseName, solidBodies, openBodies, workPart);
+
                 if (totalBodies > 0)
                 {
                     // Caso normale: corpi presenti direttamente nella parte principale.
@@ -2595,6 +2835,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                     // sorgente produce piu' di un file totale, tutto va raggruppato
                     // in una sottocartella dedicata (vedi ComputeExportFolders).
                     int effectiveOpenCount = exportNotClosedMeshes ? openBodies.Count : 0;
+                    if (solidBodies.Count + effectiveOpenCount == 0)
+                    {
+                        throw new Exception("La parte contiene solo corpi aperti, ma la loro esportazione e' disattivata: nessun STL prodotto.");
+                    }
                     string solidTargetFolder, openTargetFolder;
                     ComputeExportFolders(outputFolder, baseName, solidBodies.Count, effectiveOpenCount,
                         out solidTargetFolder, out openTargetFolder);
@@ -2656,8 +2900,9 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                     int compOkBefore = compOk;
                     int compFailedBefore = compFailed;
 
+                    List<string> indexedOccurrences = new List<string>();
                     ExportComponentTree(theSession, lw, root, totalCounts, exportedSoFar,
-                        ref compOk, ref compFailed, errLogPath, baseName, indexPath, partNameOwner,
+                        ref compOk, ref compFailed, errLogPath, baseName, indexedOccurrences, partNameOwner,
                         ref grandSolidBodies, ref grandOpenBodies, ref grandFiles, ref grandSkippedFiles);
 
                     int exportedHere = compOk - compOkBefore;
@@ -2666,6 +2911,18 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                     if (exportedHere == 0 && failedHere == 0)
                     {
                         throw new Exception("Assieme rilevato ma nessun componente con corpi trovato al suo interno.");
+                    }
+
+                    // Sostituisce lo snapshot di questo STEP una sola volta:
+                    // rieseguire lo stesso assieme non deve moltiplicare le
+                    // occorrenze nell'indice persistente.
+                    try
+                    {
+                        ReplaceComponentOccurrencesInIndex(indexPath, baseName, indexedOccurrences);
+                    }
+                    catch (Exception exIndex)
+                    {
+                        Log(lw, "  -> Avviso: indice componenti non aggiornato: " + exIndex.Message);
                     }
 
                     ok++;
@@ -2686,8 +2943,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             catch (Exception ex)
             {
                 failed++;
-                File.AppendAllText(errLogPath,
-                    string.Format("{0} - {1} - {2}{3}", DateTime.Now, stepFile, ex.Message, Environment.NewLine));
+                TryAppendErrorLog(lw, errLogPath,
+                    string.Format("{0} - {1} - {2}", DateTime.Now, stepFile, ex.Message));
                 Log(lw, "  -> ERRORE: " + ex.Message);
             }
             finally
@@ -2731,7 +2988,11 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         Log(lw, "");
         Log(lw, string.Format("Totale corpi solidi esportati: {0}", grandSolidBodies));
         Log(lw, string.Format("Totale corpi non chiusi esportati: {0}", grandOpenBodies));
-        Log(lw, string.Format("Totale file STL scritti: {0}", grandFiles));
+        Log(lw, string.Format("Totale file {0} scritti: {1}", OutputFormatLabel, grandFiles));
+        if (generateComponentReport)
+        {
+            WriteComponentReport(lw, outputFolder);
+        }
         if (grandSkippedFiles > 0)
         {
             Log(lw, string.Format("Totale file NON sovrascritti perche' gia' esistenti: {0}", grandSkippedFiles));
@@ -2759,7 +3020,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         result.InputFolder = inputFolder;
         result.Mode = decision == BatchDecision.CopyToNewFolder
             ? "Copia in nuova cartella"
-            : "Sovrascrittura automatica";
+            : (decision == BatchDecision.Overwrite ? "Sovrascrittura autorizzata" : "Conserva output esistenti");
+        result.Mode += " | Formato " + OutputFormatLabel;
         result.Steps = stepResults;
         return result;
     }
@@ -2800,7 +3062,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             const string separator = "==============================";
             List<string> lines = new List<string>();
             lines.Add(separator);
-            lines.Add(string.Format("File STL generati:       {0}", result.GrandFiles));
+            lines.Add(string.Format("File {0} generati:       {1}", OutputFormatLabel, result.GrandFiles));
             lines.Add(string.Format("STEP elaborati:          {0}/{1}", result.Ok, result.TotalSteps));
             lines.Add(string.Format("STEP falliti:            {0}", result.Failed));
             lines.Add("");
@@ -2815,7 +3077,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             lines.Add("");
             lines.Add(separator);
             lines.Add("");
-            lines.Add("=== Conversione batch STEP → STL completata ===");
+            lines.Add("=== Conversione batch STEP → " + OutputFormatLabel + " completata ===");
             lines.Add("");
             lines.Add("");
             lines.Add("Dettaglio conversione:");
@@ -2827,8 +3089,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                     step.Success ? "OK" : "ERRORE", step.Name));
                 if (step.Success)
                 {
-                    lines.Add(string.Format("      {0} {1} → {2} STL", step.SolidBodies,
-                        step.SolidBodies == 1 ? "solido" : "solidi", step.SolidBodies));
+                    lines.Add(string.Format("      {0} {1} → {2} {3}", step.SolidBodies,
+                        step.SolidBodies == 1 ? "solido" : "solidi", step.SolidBodies, OutputFormatLabel));
                     if (step.OpenBodies > 0)
                     {
                         lines.Add(string.Format("      {0} corpi non chiusi", step.OpenBodies));
@@ -2860,7 +3122,35 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         stepFiles.AddRange(Directory.GetFiles(folder, "*.stp"));
         stepFiles.AddRange(Directory.GetFiles(folder, "*.step"));
         stepFiles.Sort();
+
+        Dictionary<string, string> firstPathByBaseName = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string path in stepFiles)
+        {
+            string baseName = Path.GetFileNameWithoutExtension(path);
+            string firstPath;
+            if (firstPathByBaseName.TryGetValue(baseName, out firstPath))
+            {
+                throw new InvalidOperationException(string.Format(
+                    "Due file STEP hanno lo stesso nome base e produrrebbero output indistinguibili: {0} e {1}.",
+                    Path.GetFileName(firstPath), Path.GetFileName(path)));
+            }
+            firstPathByBaseName[baseName] = path;
+        }
         return stepFiles;
+    }
+
+    private static string CreateUniqueExportFolder(string parentFolder)
+    {
+        string prefix = "Export_" + DateTime.Now.ToString("yyyy-MM-dd_HHmmss");
+        string candidate = Path.Combine(parentFolder, prefix);
+        int suffix = 1;
+        while (Directory.Exists(candidate))
+        {
+            candidate = Path.Combine(parentFolder, prefix + "_" + suffix.ToString("00"));
+            suffix++;
+        }
+        Directory.CreateDirectory(candidate);
+        return candidate;
     }
 
     // Costruisce la mappa nome componente -> nome dello STEP che lo ha
@@ -2920,6 +3210,313 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             EnsureDirectory(openTargetFolder);
         }
     }
+
+    private static void CollectComponentReportData(Session theSession, string key, string name, List<Body> solidBodies,
+        List<Body> openBodies, Part part)
+    {
+        if (!generateComponentReport || part == null || (solidBodies.Count + openBodies.Count) == 0)
+        {
+            return;
+        }
+
+        ComponentReportRow existing;
+        if (componentReportRows.TryGetValue(key, out existing))
+        {
+            existing.Quantity++;
+            return;
+        }
+
+        ComponentReportRow row = new ComponentReportRow();
+        row.Name = name;
+        row.Quantity = 1;
+        bool millimeters = part.PartUnits == BasePart.Units.Millimeters;
+        // Il report Excel usa un'unica unita' dichiarata nelle intestazioni.
+        // Le parti in pollici vengono quindi normalizzate in mm e mm^3.
+        row.Unit = "mm";
+        row.VolumeUnit = "mm^3";
+        row.ImagePath = CaptureComponentReportImage(theSession, part, name);
+
+        try
+        {
+            NXOpen.UF.UFSession ufSession = NXOpen.UF.UFSession.GetUFSession();
+            bool hasBox = false;
+            double minX = 0, minY = 0, minZ = 0, maxX = 0, maxY = 0, maxZ = 0;
+            List<Body> allBodies = new List<Body>();
+            allBodies.AddRange(solidBodies);
+            allBodies.AddRange(openBodies);
+            foreach (Body reportBody in allBodies)
+            {
+                double[] box = new double[6];
+                ufSession.Modl.AskBoundingBox(reportBody.Tag, box);
+                if (!hasBox)
+                {
+                    minX = box[0]; minY = box[1]; minZ = box[2];
+                    maxX = box[3]; maxY = box[4]; maxZ = box[5];
+                    hasBox = true;
+                }
+                else
+                {
+                    minX = Math.Min(minX, box[0]); minY = Math.Min(minY, box[1]); minZ = Math.Min(minZ, box[2]);
+                    maxX = Math.Max(maxX, box[3]); maxY = Math.Max(maxY, box[4]); maxZ = Math.Max(maxZ, box[5]);
+                }
+            }
+            row.SizeX = maxX - minX;
+            row.SizeY = maxY - minY;
+            row.SizeZ = maxZ - minZ;
+            if (!millimeters)
+            {
+                row.SizeX *= 25.4;
+                row.SizeY *= 25.4;
+                row.SizeZ *= 25.4;
+            }
+
+            if (solidBodies.Count > 0)
+            {
+                Tag[] tags = new Tag[solidBodies.Count];
+                for (int i = 0; i < solidBodies.Count; i++) { tags[i] = solidBodies[i].Tag; }
+                double[] accuracy = new double[11];
+                accuracy[0] = 0.99;
+                double[] massProperties = new double[47];
+                double[] statistics = new double[13];
+                // UF units 3 = gram/centimeter; 1 = pound/inch. Il volume
+                // restituito e' rispettivamente cm^3 o in^3.
+                ufSession.Modl.AskMassProps3d(tags, tags.Length, 1, millimeters ? 3 : 1,
+                    1.0, 1, accuracy, massProperties, statistics);
+                row.Volume = millimeters ? massProperties[1] * 1000.0 : massProperties[1] * 16387.064;
+            }
+            if (openBodies.Count > 0)
+            {
+                row.Note = "Include " + openBodies.Count + " corpo/i aperto/i; volume riferito ai soli solidi";
+            }
+        }
+        catch (Exception ex)
+        {
+            row.Note = "Metriche non disponibili: " + ex.Message;
+        }
+
+        componentReportRows[key] = row;
+    }
+
+    private static string CaptureComponentReportImage(Session theSession, Part part, string componentName)
+    {
+        string imagesFolder = Path.Combine(outputFolder, "report_images");
+        EnsureDirectory(imagesFolder);
+        string safeName = SanitizeFileName(componentName);
+        string imagePath = Path.Combine(imagesFolder,
+            safeName + "_" + componentReportRows.Count.ToString("0000", CultureInfo.InvariantCulture) + ".jpg");
+
+        Part originalDisplay = theSession.Parts.Display;
+        Part originalWork = theSession.Parts.Work;
+        try
+        {
+            if (originalDisplay != part)
+            {
+                PartLoadStatus displayStatus;
+                theSession.Parts.SetDisplay(part, false, false, out displayStatus);
+                DisposePartLoadStatus(displayStatus);
+            }
+            if (theSession.Parts.Work != part) { theSession.Parts.SetWork(part); }
+            part.ModelingViews.WorkView.Fit();
+
+            NXOpen.Gateway.ImageExportBuilder imageBuilder = part.Views.CreateImageExportBuilder();
+            try
+            {
+                imageBuilder.RegionMode = false;
+                imageBuilder.DeviceWidth = 320;
+                imageBuilder.DeviceHeight = 220;
+                imageBuilder.FileFormat = NXOpen.Gateway.ImageExportBuilder.FileFormats.Jpg;
+                imageBuilder.FileName = imagePath;
+                imageBuilder.BackgroundOption = NXOpen.Gateway.ImageExportBuilder.BackgroundOptions.Original;
+                imageBuilder.EnhanceEdges = true;
+                imageBuilder.Commit();
+            }
+            finally
+            {
+                imageBuilder.Destroy();
+            }
+            return File.Exists(imagePath) ? imagePath : "";
+        }
+        catch (Exception)
+        {
+            return "";
+        }
+        finally
+        {
+            try
+            {
+                if (originalDisplay != null && theSession.Parts.Display != originalDisplay)
+                {
+                    PartLoadStatus restoreStatus;
+                    theSession.Parts.SetDisplay(originalDisplay, false, false, out restoreStatus);
+                    DisposePartLoadStatus(restoreStatus);
+                }
+                if (originalWork != null && theSession.Parts.Work != originalWork)
+                {
+                    theSession.Parts.SetWork(originalWork);
+                }
+            }
+            catch (Exception) { }
+        }
+    }
+
+    private static string SanitizeFileName(string value)
+    {
+        string safe = value ?? "componente";
+        foreach (char invalid in Path.GetInvalidFileNameChars())
+        {
+            safe = safe.Replace(invalid, '_');
+        }
+        return safe.Length > 80 ? safe.Substring(0, 80) : safe;
+    }
+
+    private static void WriteComponentReport(ListingWindow lw, string folder)
+    {
+        string path = Path.Combine(folder, "report_componenti.csv");
+        try
+        {
+            List<string> lines = new List<string>();
+            lines.Add("sep=;");
+            lines.Add("Immagine;Componente;Quantita;Bounding X (mm);Bounding Y (mm);Bounding Z (mm);Volume (mm^3);Note");
+            List<ComponentReportRow> rows = new List<ComponentReportRow>(componentReportRows.Values);
+            rows.Sort(delegate(ComponentReportRow a, ComponentReportRow b)
+            {
+                return string.Compare(a.Name, b.Name, StringComparison.OrdinalIgnoreCase);
+            });
+            foreach (ComponentReportRow row in rows)
+            {
+                lines.Add(string.Join(";", new string[] {
+                    EscapeCsv(row.ImagePath ?? ""), EscapeCsv(row.Name), row.Quantity.ToString(CultureInfo.InvariantCulture),
+                    row.SizeX.ToString("0.###", CultureInfo.CurrentCulture),
+                    row.SizeY.ToString("0.###", CultureInfo.CurrentCulture),
+                    row.SizeZ.ToString("0.###", CultureInfo.CurrentCulture),
+                    row.Volume.ToString("0.###", CultureInfo.CurrentCulture),
+                    EscapeCsv(row.Note ?? "") }));
+            }
+            string tempPath = path + ".tmp." + Guid.NewGuid().ToString("N");
+            File.WriteAllLines(tempPath, lines.ToArray(), new UTF8Encoding(true));
+            if (File.Exists(path)) { File.Replace(tempPath, path, null); }
+            else { File.Move(tempPath, path); }
+            Log(lw, "Report componenti generato: " + path);
+            TryCreateExcelReport(lw, path, Path.Combine(folder, "report_componenti.xlsx"));
+        }
+        catch (Exception ex)
+        {
+            Log(lw, "Avviso: impossibile generare il report componenti: " + ex.Message);
+        }
+    }
+
+    private static string EscapeCsv(string value)
+    {
+        return "\"" + (value ?? "").Replace("\"", "\"\"") + "\"";
+    }
+
+    private static void TryCreateExcelReport(ListingWindow lw, string csvPath, string xlsxPath)
+    {
+        string scriptPath = Path.Combine(Path.GetTempPath(), "nx_component_report_" + Guid.NewGuid().ToString("N") + ".ps1");
+        try
+        {
+            File.WriteAllText(scriptPath, ExcelReportPowerShell, new UTF8Encoding(false));
+            ProcessStartInfo psi = new ProcessStartInfo();
+            psi.FileName = "powershell.exe";
+            psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"" + scriptPath +
+                "\" -CsvPath \"" + csvPath + "\" -XlsxPath \"" + xlsxPath + "\"";
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            Process process = Process.Start(psi);
+            process.WaitForExit();
+            if (process.ExitCode != 0 || !File.Exists(xlsxPath))
+            {
+                Log(lw, "Avviso: Excel non ha generato report_componenti.xlsx; resta disponibile il CSV.");
+            }
+            else
+            {
+                Log(lw, "Report Excel con immagini generato: " + xlsxPath);
+            }
+            process.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Log(lw, "Avviso: impossibile creare il report Excel: " + ex.Message + ". Resta disponibile il CSV.");
+        }
+        finally
+        {
+            try { if (File.Exists(scriptPath)) File.Delete(scriptPath); }
+            catch (Exception) { }
+        }
+    }
+
+    private static readonly string ExcelReportPowerShell = @"
+param([string]$CsvPath, [string]$XlsxPath)
+$ErrorActionPreference = 'Stop'
+$excel = $null; $workbook = $null; $sheet = $null
+try {
+    $content = Get-Content -LiteralPath $CsvPath -Encoding UTF8 | Select-Object -Skip 1
+    $rows = @($content | ConvertFrom-Csv -Delimiter ';')
+    $excel = New-Object -ComObject Excel.Application
+    $excel.Visible = $false
+    $excel.DisplayAlerts = $false
+    $workbook = $excel.Workbooks.Add()
+    $sheet = $workbook.Worksheets.Item(1)
+    $sheet.Name = 'Componenti'
+    $headers = @('Immagine','Componente','Quantita','Bounding X (mm)','Bounding Y (mm)','Bounding Z (mm)','Volume (mm^3)','Note')
+    for ($c=0; $c -lt $headers.Count; $c++) { $sheet.Cells.Item(1,$c+1) = $headers[$c] }
+    $header = $sheet.Range('A1','H1')
+    $header.Font.Bold = $true; $header.Font.Color = 255; $header.HorizontalAlignment = -4108
+    $header.Interior.Color = 16777215
+    $sheet.Columns.Item(1).ColumnWidth = 24; $sheet.Columns.Item(2).ColumnWidth = 38
+    $sheet.Columns.Item(3).ColumnWidth = 12
+    $sheet.Columns.Item(4).ColumnWidth = 14; $sheet.Columns.Item(5).ColumnWidth = 14; $sheet.Columns.Item(6).ColumnWidth = 14
+    $sheet.Columns.Item(7).ColumnWidth = 18; $sheet.Columns.Item(8).ColumnWidth = 45
+    $r = 2
+    foreach ($item in $rows) {
+        $sheet.Rows.Item($r).RowHeight = 90
+        $sheet.Cells.Item($r,2) = $item.Componente
+        $sheet.Cells.Item($r,3) = [int]$item.Quantita
+        $dx = 0.0; $dy = 0.0; $dz = 0.0
+        [void][double]::TryParse($item.'Bounding X (mm)', [Globalization.NumberStyles]::Any, [Globalization.CultureInfo]::CurrentCulture, [ref]$dx)
+        [void][double]::TryParse($item.'Bounding Y (mm)', [Globalization.NumberStyles]::Any, [Globalization.CultureInfo]::CurrentCulture, [ref]$dy)
+        [void][double]::TryParse($item.'Bounding Z (mm)', [Globalization.NumberStyles]::Any, [Globalization.CultureInfo]::CurrentCulture, [ref]$dz)
+        $sheet.Cells.Item($r,4) = $dx
+        $sheet.Cells.Item($r,5) = $dy
+        $sheet.Cells.Item($r,6) = $dz
+        $volume = 0.0
+        [void][double]::TryParse($item.'Volume (mm^3)', [Globalization.NumberStyles]::Any, [Globalization.CultureInfo]::CurrentCulture, [ref]$volume)
+        $sheet.Cells.Item($r,7) = $volume
+        $sheet.Cells.Item($r,8) = $item.Note
+        if ($item.Immagine -and (Test-Path -LiteralPath $item.Immagine)) {
+            $cell = $sheet.Cells.Item($r,1)
+            $shape = $sheet.Shapes.AddPicture($item.Immagine, $false, $true, $cell.Left, $cell.Top, -1, -1)
+            $shape.LockAspectRatio = -1
+            if ($shape.Width -gt 140) { $shape.Width = 140 }
+            if ($shape.Height -gt 82) { $shape.Height = 82 }
+            $shape.Left = $cell.Left + (($cell.Width - $shape.Width) / 2)
+            $shape.Top = $cell.Top + (($cell.Height - $shape.Height) / 2)
+            $shape.Placement = 1
+        }
+        $r++
+    }
+    $lastDataRow = $r - 1
+    $sheet.Cells.Item($r,6) = 'Somma di tutti i volumi:'
+    if ($lastDataRow -ge 2) {
+        $sheet.Cells.Item($r,7).Formula = ('=SUMPRODUCT(C2:C{0},G2:G{0})' -f $lastDataRow)
+    } else {
+        $sheet.Cells.Item($r,7) = 0
+    }
+    $sheet.Range(('F{0}' -f $r),('G{0}' -f $r)).Font.Bold = $true
+    $used = $sheet.UsedRange
+    $used.Borders.LineStyle = 1; $used.VerticalAlignment = -4108; $used.HorizontalAlignment = -4108
+    $sheet.Columns.Item(2).HorizontalAlignment = -4131; $sheet.Columns.Item(8).HorizontalAlignment = -4131
+    $workbook.SaveAs($XlsxPath, 51)
+}
+finally {
+    if ($workbook) { $workbook.Close($false) }
+    if ($excel) { $excel.Quit() }
+    foreach ($obj in @($sheet,$workbook,$excel)) {
+        if ($obj) { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($obj) }
+    }
+    [GC]::Collect(); [GC]::WaitForPendingFinalizers()
+}
+";
 
     // =========================================================================
     // SCANSIONE PREVENTIVA (nessuna sessione NX coinvolta - solo filesystem e
@@ -3031,17 +3628,17 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     {
         List<string> hits = new List<string>();
 
-        hits.AddRange(SafeGlob(outputFolder, fileBaseName + ".stl"));
-        hits.AddRange(SafeGlob(outputFolder, fileBaseName + "_corpo??.stl"));
+        hits.AddRange(SafeGlob(outputFolder, fileBaseName + OutputExtension));
+        hits.AddRange(SafeGlob(outputFolder, fileBaseName + "_corpo??" + OutputExtension));
         string legacyNotClosed = Path.Combine(outputFolder, notClosedSubfolderName);
-        hits.AddRange(SafeGlob(legacyNotClosed, fileBaseName + notClosedSuffix + "*.stl"));
+        hits.AddRange(SafeGlob(legacyNotClosed, fileBaseName + notClosedSuffix + "*" + OutputExtension));
 
         string grouped = Path.Combine(outputFolder, fileBaseName);
         if (Directory.Exists(grouped))
         {
-            hits.AddRange(SafeGlob(grouped, fileBaseName + "*.stl"));
+            hits.AddRange(SafeGlob(grouped, fileBaseName + "*" + OutputExtension));
             string groupedNotClosed = Path.Combine(grouped, notClosedSubfolderName);
-            hits.AddRange(SafeGlob(groupedNotClosed, fileBaseName + notClosedSuffix + "*.stl"));
+            hits.AddRange(SafeGlob(groupedNotClosed, fileBaseName + notClosedSuffix + "*" + OutputExtension));
         }
 
         return hits;
@@ -3171,6 +3768,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         }
 
         string partName = compPart.Name;
+
         if (counts.ContainsKey(partName))
         {
             counts[partName]++;
@@ -3198,7 +3796,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     private static void ExportComponentTree(Session theSession, ListingWindow lw, Component comp,
         Dictionary<string, int> totalCounts, Dictionary<string, int> exportedSoFar,
         ref int compOk, ref int compFailed, string errLogPath,
-        string stepBaseName, string indexPath, Dictionary<string, string> partNameOwner,
+        string stepBaseName, List<string> indexedOccurrences, Dictionary<string, string> partNameOwner,
         ref int grandSolid, ref int grandOpen, ref int grandFiles, ref int grandSkipped)
     {
         Component[] children = comp.GetChildren();
@@ -3208,7 +3806,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             foreach (Component child in children)
             {
                 ExportComponentTree(theSession, lw, child, totalCounts, exportedSoFar,
-                    ref compOk, ref compFailed, errLogPath, stepBaseName, indexPath, partNameOwner,
+                    ref compOk, ref compFailed, errLogPath, stepBaseName, indexedOccurrences, partNameOwner,
                     ref grandSolid, ref grandOpen, ref grandFiles, ref grandSkipped);
             }
         }
@@ -3249,6 +3847,9 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
         string partName = compPart.Name;
 
+        CollectComponentReportData(theSession, stepBaseName + "|" + partName, partName,
+            compSolidBodies, compOpenBodies, compPart);
+
         int total = totalCounts.ContainsKey(partName) ? totalCounts[partName] : 1;
         int occ;
         if (!exportedSoFar.TryGetValue(partName, out occ))
@@ -3260,11 +3861,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
         string fileBaseName = BuildInstanceFileBaseName(lw, stepBaseName, partName, occ, total, partNameOwner);
 
-        // Registro questa occorrenza nell'indice: NX ha comunque generato/usato
-        // un .prt per questa Part durante l'apertura dell'assieme, quindi vale la
-        // pena tenerne traccia (con la quantita' corretta) anche se l'export
-        // STL dovesse fallire.
-        RegisterComponentOccurrenceInIndex(indexPath, stepBaseName, partName);
+        indexedOccurrences.Add(partName);
 
         Log(lw, "");
 
@@ -3312,9 +3909,9 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 throw;
             }
             compFailed++;
-            File.AppendAllText(errLogPath,
-                string.Format("{0} - componente {1} (occorrenza {2}/{3}) - {4}{5}",
-                    DateTime.Now, partName, occ, total, ex.Message, Environment.NewLine));
+            TryAppendErrorLog(lw, errLogPath,
+                string.Format("{0} - componente {1} (occorrenza {2}/{3}) - {4}",
+                    DateTime.Now, partName, occ, total, ex.Message));
             Log(lw, string.Format("     -> componente ERRORE: {0} [istanza {1}/{2}] - {3}",
                 partName, occ, total, ex.Message));
         }
@@ -3347,14 +3944,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             // Vedi commento equivalente sull'apertura dello STEP: AllowAdditional non
             // garantisce che la parte aperta diventi anche la Work part, che invece
             // serve ad ApplicationSwitchImmediate.
-            Part workPart = theSession.Parts.Work;
-            if (workPart == null)
+            Part workPart = basePart1 as Part;
+            if (workPart != null && theSession.Parts.Work != workPart)
             {
-                workPart = basePart1 as Part;
-                if (workPart != null)
-                {
-                    theSession.Parts.SetWork(workPart);
-                }
+                theSession.Parts.SetWork(workPart);
             }
             if (workPart == null)
             {
@@ -3382,6 +3975,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             }
 
             int totalBodies = solidBodies.Count + openBodies.Count;
+
+            CollectComponentReportData(theSession, "PRT|" + partName, partName, solidBodies, openBodies, workPart);
 
             if (totalBodies == 0)
             {
@@ -3427,8 +4022,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 throw;
             }
             compFailed++;
-            File.AppendAllText(errLogPath,
-                string.Format("{0} - componente (prt diretto) {1} - {2}{3}", DateTime.Now, fileBaseName, ex.Message, Environment.NewLine));
+            TryAppendErrorLog(lw, errLogPath,
+                string.Format("{0} - componente (prt diretto) {1} - {2}", DateTime.Now, fileBaseName, ex.Message));
             Log(lw, string.Format("     -> componente ERRORE (prt diretto): {0} - {1}", fileBaseName, ex.Message));
         }
         finally
@@ -3525,19 +4120,61 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         return index;
     }
 
-    // Aggiunge SEMPRE una nuova riga per questa occorrenza (nessuna deduplica,
-    // perche' la quantita' del componente e' significativa).
-    private static void RegisterComponentOccurrenceInIndex(string indexPath, string stepBaseName, string partName)
+    // Aggiorna atomicamente lo snapshot di un singolo STEP, conservando le
+    // ripetizioni all'interno del run ma eliminando quelle accumulate da run
+    // precedenti. In questo modo la quantita' resta significativa e stabile.
+    private static void ReplaceComponentOccurrencesInIndex(string indexPath, string stepBaseName,
+        List<string> occurrences)
+    {
+        string tempPath = indexPath + ".tmp." + Guid.NewGuid().ToString("N");
+        try
+        {
+            List<string> lines = new List<string>();
+            if (File.Exists(indexPath))
+            {
+                foreach (string line in File.ReadAllLines(indexPath))
+                {
+                    string[] parts = line.Split('|');
+                    if (parts.Length == 2 && string.Equals(parts[0].Trim(), stepBaseName,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
+                    lines.Add(line);
+                }
+            }
+            foreach (string partName in occurrences)
+            {
+                lines.Add(stepBaseName + "|" + partName);
+            }
+
+            File.WriteAllLines(tempPath, lines.ToArray(), new UTF8Encoding(false));
+            if (File.Exists(indexPath))
+            {
+                File.Replace(tempPath, indexPath, null);
+            }
+            else
+            {
+                File.Move(tempPath, indexPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            try { if (File.Exists(tempPath)) File.Delete(tempPath); }
+            catch (Exception) { }
+            throw new IOException("Impossibile aggiornare l'indice componenti: " + ex.Message, ex);
+        }
+    }
+
+    private static void TryAppendErrorLog(ListingWindow lw, string path, string message)
     {
         try
         {
-            File.AppendAllText(indexPath, stepBaseName + "|" + partName + Environment.NewLine);
+            File.AppendAllText(path, message + Environment.NewLine);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            // se la scrittura dell'indice fallisce non blocchiamo l'esportazione:
-            // nel peggiore dei casi la prossima esecuzione non trovera' questa voce
-            // e ritentera' l'apertura normale dello STEP.
+            Log(lw, "  -> Avviso: impossibile aggiornare il log errori: " + ex.Message);
         }
     }
 
@@ -3568,12 +4205,12 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         if (bodies.Count == 1)
         {
             ThrowIfCancellationRequested();
-            string outFile = Path.Combine(outputFolder, baseFileName + ".stl");
+            string outFile = Path.Combine(outputFolder, baseFileName + OutputExtension);
             if (!TryReserveOutputFile(lw, outFile, ref skippedCount))
             {
                 return outputFiles;
             }
-            ExportSingleBodyToStl(theSession, bodies[0], outFile);
+            ExportReservedBodyToStl(theSession, bodies[0], outFile);
             outputFiles.Add(outFile);
             return outputFiles;
         }
@@ -3581,12 +4218,12 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         for (int i = 0; i < bodies.Count; i++)
         {
             ThrowIfCancellationRequested();
-            string outFile = Path.Combine(outputFolder, string.Format("{0}_corpo{1:00}.stl", baseFileName, i + 1));
+            string outFile = Path.Combine(outputFolder, string.Format("{0}_corpo{1:00}{2}", baseFileName, i + 1, OutputExtension));
             if (!TryReserveOutputFile(lw, outFile, ref skippedCount))
             {
                 continue;
             }
-            ExportSingleBodyToStl(theSession, bodies[i], outFile);
+            ExportReservedBodyToStl(theSession, bodies[i], outFile);
             outputFiles.Add(outFile);
         }
 
@@ -3663,7 +4300,54 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     // STLCreator.Destroy() e' in un blocco finally: se Commit() lancia
     // un'eccezione (es. corpo non valido, path non scrivibile), la risorsa NX
     // viene comunque rilasciata invece di restare aperta per il resto del batch.
+    private static void ExportReservedBodyToStl(Session theSession, Body body, string outputFile)
+    {
+        try
+        {
+            ExportSingleBodyToStl(theSession, body, outputFile);
+        }
+        catch
+        {
+            // La prenotazione appartiene solo agli output completati: in caso
+            // di errore un produttore successivo puo' ritentare lo stesso path.
+            writtenThisRun.Remove(outputFile);
+            throw;
+        }
+    }
+
     private static void ExportSingleBodyToStl(Session theSession, Body body, string outputFile)
+    {
+        string outputDirectory = Path.GetDirectoryName(outputFile);
+        string tempFile = Path.Combine(outputDirectory,
+            "." + Path.GetFileNameWithoutExtension(outputFile) + "." + Guid.NewGuid().ToString("N") + ".tmp" + OutputExtension);
+        try
+        {
+            if (meshExportFormat == MeshExportFormat.ThreeMf)
+            {
+                ExportSingleBodyToThreeMf(theSession, body, tempFile);
+            }
+            else
+            {
+                ExportSingleBodyToStlFile(theSession, body, tempFile);
+            }
+
+            if (File.Exists(outputFile))
+            {
+                File.Replace(tempFile, outputFile, null);
+            }
+            else
+            {
+                File.Move(tempFile, outputFile);
+            }
+        }
+        finally
+        {
+            try { if (File.Exists(tempFile)) File.Delete(tempFile); }
+            catch (Exception) { }
+        }
+    }
+
+    private static void ExportSingleBodyToStlFile(Session theSession, Body body, string tempFile)
     {
         STLCreator stlCreator1 = theSession.DexManager.CreateStlCreator();
         try
@@ -3671,7 +4355,7 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
             stlCreator1.AutoNormalGen = true;
             stlCreator1.ChordalTol = chordalTol;
             stlCreator1.AngularTol = angularTol;
-            stlCreator1.OutputFile = outputFile;
+            stlCreator1.OutputFile = tempFile;
 
             NXObject[] singleBodyArray = new NXObject[] { body };
             stlCreator1.ExportSelectionBlock.Add(singleBodyArray);
@@ -3681,6 +4365,40 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         finally
         {
             stlCreator1.Destroy();
+        }
+    }
+
+    // API registrata direttamente da NX Designcenter 2512 tramite
+    // File -> Export -> 3MF. SelectBody accetta il Body senza passare dal
+    // SelectionBlock usato dallo STLCreator.
+    private static void ExportSingleBodyToThreeMf(Session theSession, Body body, string tempFile)
+    {
+        Creator3MF creator = theSession.DexManager.CreateCreator3mf();
+        try
+        {
+            creator.OutputFile = tempFile;
+            creator.ChordalTolerance = chordalTol;
+            creator.AngularTolerance = angularTol;
+
+            // La sequenza registrata da NX 2512 inizializza e aggiunge un
+            // elemento alla lista lattice prima della selezione dei corpi.
+            // L'elemento aggiunto e' posseduto dal Creator3MF e viene
+            // rilasciato insieme al creator.
+            NXOpen.GeometricUtilities.LatticeItemBuilder latticeItem =
+                creator.LatticeItemList.CreateLatticeItemBuilder();
+            creator.LatticeItemList.LatticeItemList.Append(latticeItem);
+
+            bool added = creator.SelectBody.Add(body);
+            if (!added)
+            {
+                throw new Exception("NX non ha accettato il corpo nella selezione dell'exporter 3MF.");
+            }
+
+            creator.Commit();
+        }
+        finally
+        {
+            creator.Destroy();
         }
     }
 
