@@ -10,8 +10,9 @@
 //   essere immediatamente sostituita digitando o incollando un nuovo valore.
 // - Il pulsante "Sfoglia" apre ora un normale dialogo Esplora file di Windows,
 //   con barra degli indirizzi, accesso rapido e navigazione moderna, invece
-//   del vecchio FolderBrowserDialog ad albero. Lo stesso selettore moderno e'
-//   usato anche dal flusso di fallback.
+//   del vecchio FolderBrowserDialog ad albero. Il fallback interno a NX
+//   conserva invece il dialogo nativo piu' sicuro per evitare crash del
+//   processo dovuti al noto mismatch System.Drawing/WinForms.
 //
 // COSA ERA STATO CORRETTO/AGGIUNTO IN v15:
 // - FIX CRITICO: l'apertura di un file STEP (o di un .prt di componente gia'
@@ -517,7 +518,7 @@ public class NXJournal
         // eventuale risoluzione conflitti, e (a fine conversione) riepilogo.
         // Se PowerShell non fosse disponibile in questo ambiente per
         // qualunque motivo, il try/catch lo rileva e si passa
-        // automaticamente al fallback a soli MessageBox/OpenFileDialog
+        // automaticamente al fallback a soli MessageBox/FolderBrowserDialog
         // (RunFallbackFlow), con la stessa identica logica "chiedi solo se
         // serve".
         BatchDecision decision = BatchDecision.Stop;
@@ -609,52 +610,6 @@ public class NXJournal
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-
-# Il selettore viene implementato in C# compilato anziche' pilotare
-# OpenFileDialog direttamente da uno ScriptBlock PowerShell. Quando ShowDialog
-# era richiamato dentro l'handler Click, alcune versioni di Windows PowerShell
-# perdevano il riferimento Automation al dialogo durante i callback COM e
-# mostravano "Impossibile chiamare un metodo su un'espressione con valore null".
-# Tenere creazione, ShowDialog e Dispose nello stesso metodo .NET evita quel
-# problema e conserva la normale interfaccia Esplora file.
-Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @""
-using System;
-using System.IO;
-using System.Windows.Forms;
-
-public static class ModernFolderPicker
-{
-    public static string Show(string initialPath, string title)
-    {
-        using (OpenFileDialog dialog = new OpenFileDialog())
-        {
-            dialog.Title = title;
-            dialog.CheckFileExists = false;
-            dialog.CheckPathExists = true;
-            dialog.ValidateNames = false;
-            dialog.DereferenceLinks = true;
-            dialog.RestoreDirectory = true;
-            dialog.AutoUpgradeEnabled = true;
-            dialog.Filter = ""Cartelle|*.folder"";
-            dialog.FileName = ""Seleziona questa cartella"";
-
-            if (!String.IsNullOrEmpty(initialPath) && Directory.Exists(initialPath))
-            {
-                dialog.InitialDirectory = initialPath;
-            }
-
-            if (dialog.ShowDialog() != DialogResult.OK)
-            {
-                return null;
-            }
-
-            return Directory.Exists(dialog.FileName)
-                ? dialog.FileName
-                : Path.GetDirectoryName(dialog.FileName);
-        }
-    }
-}
-""@
 
 $ic = [System.Globalization.CultureInfo]::InvariantCulture
 
@@ -758,13 +713,6 @@ function Style-TextBox($txt) {
             $_.Handled = $true
         }
     })
-}
-
-# Il metodo C# mantiene vivo il dialogo per l'intera chiamata e restituisce
-# soltanto una stringa a PowerShell: nessun oggetto COM/WinForms attraversa
-# quindi il confine dello ScriptBlock associato al pulsante.
-function Select-FolderModern($initialPath, $title) {
-    return [ModernFolderPicker]::Show($initialPath, $title)
 }
 
 function Style-NumericUpDown($num) {
@@ -1097,8 +1045,36 @@ $btnBrowseIn.SetBounds(536, 96, 88, 30)
 $pnlConfig.Controls.Add($btnBrowseIn)
 Style-SecondaryButton $btnBrowseIn
 $btnBrowseIn.Add_Click({
-    $selected = Select-FolderModern $txtIn.Text ""Seleziona la cartella dei file STEP""
-    if ($selected) { $txtIn.Text = $selected }
+    $folderDialogIn = New-Object System.Windows.Forms.OpenFileDialog
+    try {
+        $folderDialogIn.Title = ""Seleziona la cartella dei file STEP""
+        $folderDialogIn.CheckFileExists = $false
+        $folderDialogIn.CheckPathExists = $true
+        $folderDialogIn.ValidateNames = $false
+        $folderDialogIn.DereferenceLinks = $true
+        $folderDialogIn.RestoreDirectory = $true
+        $folderDialogIn.AutoUpgradeEnabled = $true
+        $folderDialogIn.Filter = ""Cartelle|*.folder""
+        $folderDialogIn.FileName = ""Seleziona questa cartella""
+        if (Test-Path -LiteralPath $txtIn.Text -PathType Container) {
+            $folderDialogIn.InitialDirectory = $txtIn.Text
+        }
+        if ($folderDialogIn.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $chosenPath = if (Test-Path -LiteralPath $folderDialogIn.FileName -PathType Container) {
+                $folderDialogIn.FileName
+            } else {
+                [System.IO.Path]::GetDirectoryName($folderDialogIn.FileName)
+            }
+            if ($chosenPath) { $txtIn.Text = $chosenPath }
+        }
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show(
+            $form, ""Impossibile aprire il selettore: "" + $_.Exception.Message,
+            ""Selettore cartella"", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+    } finally {
+        if ($null -ne $folderDialogIn) { $folderDialogIn.Dispose() }
+    }
 })
 
 $lblOut = New-Object System.Windows.Forms.Label
@@ -1120,8 +1096,36 @@ $btnBrowseOut.SetBounds(536, 160, 88, 30)
 $pnlConfig.Controls.Add($btnBrowseOut)
 Style-SecondaryButton $btnBrowseOut
 $btnBrowseOut.Add_Click({
-    $selected = Select-FolderModern $txtOut.Text ""Seleziona la cartella di output""
-    if ($selected) { $txtOut.Text = $selected }
+    $folderDialogOut = New-Object System.Windows.Forms.OpenFileDialog
+    try {
+        $folderDialogOut.Title = ""Seleziona la cartella di output""
+        $folderDialogOut.CheckFileExists = $false
+        $folderDialogOut.CheckPathExists = $true
+        $folderDialogOut.ValidateNames = $false
+        $folderDialogOut.DereferenceLinks = $true
+        $folderDialogOut.RestoreDirectory = $true
+        $folderDialogOut.AutoUpgradeEnabled = $true
+        $folderDialogOut.Filter = ""Cartelle|*.folder""
+        $folderDialogOut.FileName = ""Seleziona questa cartella""
+        if (Test-Path -LiteralPath $txtOut.Text -PathType Container) {
+            $folderDialogOut.InitialDirectory = $txtOut.Text
+        }
+        if ($folderDialogOut.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $chosenPath = if (Test-Path -LiteralPath $folderDialogOut.FileName -PathType Container) {
+                $folderDialogOut.FileName
+            } else {
+                [System.IO.Path]::GetDirectoryName($folderDialogOut.FileName)
+            }
+            if ($chosenPath) { $txtOut.Text = $chosenPath }
+        }
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show(
+            $form, ""Impossibile aprire il selettore: "" + $_.Exception.Message,
+            ""Selettore cartella"", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+    } finally {
+        if ($null -ne $folderDialogOut) { $folderDialogOut.Dispose() }
+    }
 })
 
 $lblFormat = New-Object System.Windows.Forms.Label
@@ -2446,40 +2450,26 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     // quella di default?" - la cartella predefinita e' gia' preselezionata
     // nel dialogo stesso, quindi basta premere OK per confermarla cosi'
     // com'e', oppure navigare altrove prima di confermare. Annulla
-    // interrompe. OpenFileDialog mostra il normale Esplora file moderno e,
-    // usando un nome segnaposto senza richiedere che il file esista, permette
-    // di confermare la cartella corrente; dal risultato viene conservato il
-    // solo DirectoryName. Non risente del problema di compatibilita'
-    // System.Drawing/System.Windows.Forms che colpisce Form.ShowDialog su
-    // questa installazione NX - ma per sicurezza e' comunque avvolto in un
-    // try/catch: se anche questo dovesse fallire, si ripiega sulla cartella
-    // predefinita invece di far fallire tutto il journal.
+    // interrompe. Nel fallback, che gira DENTRO nx.exe, si conserva
+    // FolderBrowserDialog: OpenFileDialog puo' attraversare il percorso
+    // System.Drawing incompatibile che su alcune installazioni manda in crash
+    // NX senza lasciare un log. AutoUpgradeEnabled richiede a Windows la veste
+    // piu' moderna disponibile, ma la stabilita' del processo NX ha priorita'.
     private static string AskForFolder(string folderDescription, string defaultFolder)
     {
         try
         {
-            using (OpenFileDialog dlg = new OpenFileDialog())
+            using (FolderBrowserDialog dlg = new FolderBrowserDialog())
             {
-                dlg.Title = "Seleziona la cartella di " + folderDescription;
-                dlg.CheckFileExists = false;
-                dlg.CheckPathExists = true;
-                dlg.ValidateNames = false;
-                dlg.DereferenceLinks = true;
-                dlg.RestoreDirectory = true;
                 dlg.AutoUpgradeEnabled = true;
-                dlg.Filter = "Cartelle|*.folder";
-                dlg.FileName = "Seleziona questa cartella";
+                dlg.Description = "Cartella di " + folderDescription;
                 if (Directory.Exists(defaultFolder))
                 {
-                    dlg.InitialDirectory = defaultFolder;
+                    dlg.SelectedPath = defaultFolder;
                 }
                 if (dlg.ShowDialog() == DialogResult.OK)
                 {
-                    if (Directory.Exists(dlg.FileName))
-                    {
-                        return dlg.FileName;
-                    }
-                    return Path.GetDirectoryName(dlg.FileName);
+                    return dlg.SelectedPath;
                 }
                 return null;
             }
