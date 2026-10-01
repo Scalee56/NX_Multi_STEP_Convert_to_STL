@@ -1,9 +1,25 @@
 // =============================================================================
-// NX Open Journal - Conversione massiva STEP -> STL (v15)
+// NX Open Journal - Conversione massiva STEP -> STL (v16)
 // Basato sul journal originale "journal.cs" (export singolo STL registrato in NX),
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
-// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v15):
+// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v16):
+// - FIX crash/JIT aprendo il selettore subito dopo la GUI: il timer della
+//   dissolvenza catturava una variabile locale che PowerShell 5.1 risolveva
+//   poi a null nel callback Tick (la traccia terminava infatti in
+//   System.Windows.Forms.Timer.OnTick). Ora il callback usa il proprio sender;
+//   inoltre lo spinner di attesa gira soltanto quando il pannello e' visibile.
+// - I percorsi di input e output sono ora campi di testo pienamente
+//   modificabili: Ctrl+A seleziona sempre l'intero percorso e, per comodita',
+//   lo fanno anche Ctrl+Shift+Su e Ctrl+Shift+Home. La selezione puo' quindi
+//   essere immediatamente sostituita digitando o incollando un nuovo valore.
+// - Il pulsante "Sfoglia" apre ora un normale dialogo Esplora file di Windows,
+//   con barra degli indirizzi, accesso rapido e navigazione moderna, invece
+//   del vecchio FolderBrowserDialog ad albero. Il fallback interno a NX
+//   conserva invece il dialogo nativo piu' sicuro per evitare crash del
+//   processo dovuti al noto mismatch System.Drawing/WinForms.
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v15:
 // - FIX CRITICO: l'apertura di un file STEP (o di un .prt di componente gia'
 //   noto) con OpenActiveDisplay(..., DisplayPartOption.AllowAdditional, ...)
 //   non garantisce che la parte aperta diventi anche la "Work part" (puo'
@@ -688,6 +704,20 @@ function Style-TextBox($txt) {
     $txt.BorderStyle = ""FixedSingle""
     $txt.BackColor = $ClrCardBg
     $txt.ForeColor = $ClrText
+    # Rende esplicito il comportamento da normale riga di testo anche sulle
+    # versioni WinForms incluse nelle diverse installazioni di PowerShell.
+    $txt.ShortcutsEnabled = $true
+    $txt.WordWrap = $false
+    $txt.Add_KeyDown({
+        if (($_.Control -and $_.KeyCode -eq [System.Windows.Forms.Keys]::A) -or
+            ($_.Control -and $_.Shift -and
+             ($_.KeyCode -eq [System.Windows.Forms.Keys]::Up -or
+              $_.KeyCode -eq [System.Windows.Forms.Keys]::Home))) {
+            $this.SelectAll()
+            $_.SuppressKeyPress = $true
+            $_.Handled = $true
+        }
+    })
 }
 
 function Style-NumericUpDown($num) {
@@ -742,11 +772,16 @@ function Enable-FadeIn($form) {
         $fadeTimer = New-Object System.Windows.Forms.Timer
         $fadeTimer.Interval = 15
         $fadeTimer.Add_Tick({
+            param($timerSender, $timerEvent)
             $next = $form.Opacity + 0.15
             if ($next -ge 1.0) {
                 $form.Opacity = 1.0
-                $fadeTimer.Stop()
-                $fadeTimer.Dispose()
+                # Non catturare $fadeTimer: lo scope locale dell'evento Shown
+                # non esiste piu' quando scatta Tick e Windows PowerShell 5.1
+                # lo risolve quindi a $null. Il sender e' invece sempre il
+                # Timer che ha generato l'evento, anche dentro dialoghi modali.
+                $timerSender.Stop()
+                $timerSender.Dispose()
             } else {
                 $form.Opacity = $next
             }
@@ -1020,9 +1055,36 @@ $btnBrowseIn.SetBounds(536, 96, 88, 30)
 $pnlConfig.Controls.Add($btnBrowseIn)
 Style-SecondaryButton $btnBrowseIn
 $btnBrowseIn.Add_Click({
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    if (Test-Path -LiteralPath $txtIn.Text) { $dlg.SelectedPath = $txtIn.Text }
-    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtIn.Text = $dlg.SelectedPath }
+    $folderDialogIn = New-Object System.Windows.Forms.OpenFileDialog
+    try {
+        $folderDialogIn.Title = ""Seleziona la cartella dei file STEP""
+        $folderDialogIn.CheckFileExists = $false
+        $folderDialogIn.CheckPathExists = $true
+        $folderDialogIn.ValidateNames = $false
+        $folderDialogIn.DereferenceLinks = $true
+        $folderDialogIn.RestoreDirectory = $true
+        $folderDialogIn.AutoUpgradeEnabled = $true
+        $folderDialogIn.Filter = ""Cartelle|*.folder""
+        $folderDialogIn.FileName = ""Seleziona questa cartella""
+        if (Test-Path -LiteralPath $txtIn.Text -PathType Container) {
+            $folderDialogIn.InitialDirectory = $txtIn.Text
+        }
+        if ($folderDialogIn.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $chosenPath = if (Test-Path -LiteralPath $folderDialogIn.FileName -PathType Container) {
+                $folderDialogIn.FileName
+            } else {
+                [System.IO.Path]::GetDirectoryName($folderDialogIn.FileName)
+            }
+            if ($chosenPath) { $txtIn.Text = $chosenPath }
+        }
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show(
+            $form, ""Impossibile aprire il selettore: "" + $_.Exception.Message,
+            ""Selettore cartella"", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+    } finally {
+        if ($null -ne $folderDialogIn) { $folderDialogIn.Dispose() }
+    }
 })
 
 $lblOut = New-Object System.Windows.Forms.Label
@@ -1044,9 +1106,36 @@ $btnBrowseOut.SetBounds(536, 160, 88, 30)
 $pnlConfig.Controls.Add($btnBrowseOut)
 Style-SecondaryButton $btnBrowseOut
 $btnBrowseOut.Add_Click({
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    if (Test-Path -LiteralPath $txtOut.Text) { $dlg.SelectedPath = $txtOut.Text }
-    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtOut.Text = $dlg.SelectedPath }
+    $folderDialogOut = New-Object System.Windows.Forms.OpenFileDialog
+    try {
+        $folderDialogOut.Title = ""Seleziona la cartella di output""
+        $folderDialogOut.CheckFileExists = $false
+        $folderDialogOut.CheckPathExists = $true
+        $folderDialogOut.ValidateNames = $false
+        $folderDialogOut.DereferenceLinks = $true
+        $folderDialogOut.RestoreDirectory = $true
+        $folderDialogOut.AutoUpgradeEnabled = $true
+        $folderDialogOut.Filter = ""Cartelle|*.folder""
+        $folderDialogOut.FileName = ""Seleziona questa cartella""
+        if (Test-Path -LiteralPath $txtOut.Text -PathType Container) {
+            $folderDialogOut.InitialDirectory = $txtOut.Text
+        }
+        if ($folderDialogOut.ShowDialog($form) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $chosenPath = if (Test-Path -LiteralPath $folderDialogOut.FileName -PathType Container) {
+                $folderDialogOut.FileName
+            } else {
+                [System.IO.Path]::GetDirectoryName($folderDialogOut.FileName)
+            }
+            if ($chosenPath) { $txtOut.Text = $chosenPath }
+        }
+    } catch {
+        [System.Windows.Forms.MessageBox]::Show(
+            $form, ""Impossibile aprire il selettore: "" + $_.Exception.Message,
+            ""Selettore cartella"", [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
+    } finally {
+        if ($null -ne $folderDialogOut) { $folderDialogOut.Dispose() }
+    }
 })
 
 $lblFormat = New-Object System.Windows.Forms.Label
@@ -1185,9 +1274,10 @@ $waitSpinnerTimer = New-Object System.Windows.Forms.Timer
 $waitSpinnerTimer.Interval = 20
 $waitSpinnerTimer.Add_Tick({
     $script:waitSpinnerAngle = ($script:waitSpinnerAngle + 8) % 360
-    $pnlWaitSpinner.Invalidate()
+    if ($null -ne $pnlWaitSpinner -and -not $pnlWaitSpinner.IsDisposed) {
+        $pnlWaitSpinner.Invalidate()
+    }
 })
-$waitSpinnerTimer.Start()
 
 function Show-Waiting($subText) {
     $lblWaitSub.Text = $subText
@@ -1199,6 +1289,7 @@ function Show-Waiting($subText) {
     $form.Text = ""Elaborazione in corso...""
     $form.AcceptButton = $null
     $form.CancelButton = $null
+    if (-not $waitSpinnerTimer.Enabled) { $waitSpinnerTimer.Start() }
     Center-Form $form 420 220
 }
 
@@ -1589,6 +1680,7 @@ $orchTimer.Add_Tick({
     $stageName = $cmd[""Stage""]
 
     if ($stageName -eq ""Decision"") {
+        $waitSpinnerTimer.Stop()
         $decisionInputFile = Join-Path $WorkDir ""decision_input.txt""
         $summaryText = """"
         if (Test-Path -LiteralPath $decisionInputFile) {
@@ -1607,6 +1699,7 @@ $orchTimer.Add_Tick({
         Center-Form $form 660 520
     }
     elseif ($stageName -eq ""Progress"") {
+        $waitSpinnerTimer.Stop()
         $progMeta = Read-KeyValueFile (Join-Path $WorkDir ""progress_meta.txt"")
         $script:progressOutFolder = $progMeta[""OutputFolder""]
         $script:progressStatusFile = Join-Path $WorkDir ""progress_status.txt""
@@ -1654,6 +1747,7 @@ $orchTimer.Add_Tick({
         # mostrato il log finale.
         $script:summaryDisplayed = $true
         $script:doneReceived = $true
+        $waitSpinnerTimer.Stop()
         $progressPollTimer.Stop()
         $progressRenderTimer.Stop()
         $progressSpinnerTimer.Stop()
@@ -2371,19 +2465,18 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     // quella di default?" - la cartella predefinita e' gia' preselezionata
     // nel dialogo stesso, quindi basta premere OK per confermarla cosi'
     // com'e', oppure navigare altrove prima di confermare. Annulla
-    // interrompe. FolderBrowserDialog (a differenza di una Form
-    // personalizzata) si appoggia al selettore di cartelle nativo di
-    // Windows, quindi non risente del problema di compatibilita'
-    // System.Drawing/System.Windows.Forms che colpisce Form.ShowDialog su
-    // questa installazione NX - ma per sicurezza e' comunque avvolto in un
-    // try/catch: se anche questo dovesse fallire, si ripiega sulla cartella
-    // predefinita invece di far fallire tutto il journal.
+    // interrompe. Nel fallback, che gira DENTRO nx.exe, si conserva
+    // FolderBrowserDialog: OpenFileDialog puo' attraversare il percorso
+    // System.Drawing incompatibile che su alcune installazioni manda in crash
+    // NX senza lasciare un log. AutoUpgradeEnabled richiede a Windows la veste
+    // piu' moderna disponibile, ma la stabilita' del processo NX ha priorita'.
     private static string AskForFolder(string folderDescription, string defaultFolder)
     {
         try
         {
             using (FolderBrowserDialog dlg = new FolderBrowserDialog())
             {
+                dlg.AutoUpgradeEnabled = true;
                 dlg.Description = "Cartella di " + folderDescription;
                 if (Directory.Exists(defaultFolder))
                 {
