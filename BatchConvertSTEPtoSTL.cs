@@ -610,6 +610,52 @@ public class NXJournal
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# Il selettore viene implementato in C# compilato anziche' pilotare
+# OpenFileDialog direttamente da uno ScriptBlock PowerShell. Quando ShowDialog
+# era richiamato dentro l'handler Click, alcune versioni di Windows PowerShell
+# perdevano il riferimento Automation al dialogo durante i callback COM e
+# mostravano "Impossibile chiamare un metodo su un'espressione con valore null".
+# Tenere creazione, ShowDialog e Dispose nello stesso metodo .NET evita quel
+# problema e conserva la normale interfaccia Esplora file.
+Add-Type -ReferencedAssemblies System.Windows.Forms -TypeDefinition @""
+using System;
+using System.IO;
+using System.Windows.Forms;
+
+public static class ModernFolderPicker
+{
+    public static string Show(string initialPath, string title)
+    {
+        using (OpenFileDialog dialog = new OpenFileDialog())
+        {
+            dialog.Title = title;
+            dialog.CheckFileExists = false;
+            dialog.CheckPathExists = true;
+            dialog.ValidateNames = false;
+            dialog.DereferenceLinks = true;
+            dialog.RestoreDirectory = true;
+            dialog.AutoUpgradeEnabled = true;
+            dialog.Filter = ""Cartelle|*.folder"";
+            dialog.FileName = ""Seleziona questa cartella"";
+
+            if (!String.IsNullOrEmpty(initialPath) && Directory.Exists(initialPath))
+            {
+                dialog.InitialDirectory = initialPath;
+            }
+
+            if (dialog.ShowDialog() != DialogResult.OK)
+            {
+                return null;
+            }
+
+            return Directory.Exists(dialog.FileName)
+                ? dialog.FileName
+                : Path.GetDirectoryName(dialog.FileName);
+        }
+    }
+}
+""@
+
 $ic = [System.Globalization.CultureInfo]::InvariantCulture
 
 # --- Palette e stile condivisi da tutte le finestre (look chiaro e piatto, stile ""Apple"") ---
@@ -714,33 +760,11 @@ function Style-TextBox($txt) {
     })
 }
 
-# OpenFileDialog usa la normale interfaccia Esplora file di Windows (barra
-# indirizzi, Accesso rapido, unita' e percorsi di rete). Il nome segnaposto
-# permette di confermare la cartella visualizzata senza dover scegliere un
-# file: dal risultato si conserva soltanto DirectoryName.
+# Il metodo C# mantiene vivo il dialogo per l'intera chiamata e restituisce
+# soltanto una stringa a PowerShell: nessun oggetto COM/WinForms attraversa
+# quindi il confine dello ScriptBlock associato al pulsante.
 function Select-FolderModern($initialPath, $title) {
-    $dlg = New-Object System.Windows.Forms.OpenFileDialog
-    $dlg.Title = $title
-    $dlg.CheckFileExists = $false
-    $dlg.CheckPathExists = $true
-    $dlg.ValidateNames = $false
-    $dlg.DereferenceLinks = $true
-    $dlg.RestoreDirectory = $true
-    $dlg.AutoUpgradeEnabled = $true
-    $dlg.Filter = ""Cartelle|*.folder""
-    $dlg.FileName = ""Seleziona questa cartella""
-    if (Test-Path -LiteralPath $initialPath -PathType Container) {
-        $dlg.InitialDirectory = $initialPath
-    }
-
-    try {
-        if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
-        if (Test-Path -LiteralPath $dlg.FileName -PathType Container) { return $dlg.FileName }
-        return [System.IO.Path]::GetDirectoryName($dlg.FileName)
-    }
-    finally {
-        $dlg.Dispose()
-    }
+    return [ModernFolderPicker]::Show($initialPath, $title)
 }
 
 function Style-NumericUpDown($num) {
