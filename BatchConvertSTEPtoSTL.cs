@@ -4,6 +4,11 @@
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
 // COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v16):
+// - FIX crash/JIT aprendo il selettore subito dopo la GUI: il timer della
+//   dissolvenza catturava una variabile locale che PowerShell 5.1 risolveva
+//   poi a null nel callback Tick (la traccia terminava infatti in
+//   System.Windows.Forms.Timer.OnTick). Ora il callback usa il proprio sender;
+//   inoltre lo spinner di attesa gira soltanto quando il pannello e' visibile.
 // - I percorsi di input e output sono ora campi di testo pienamente
 //   modificabili: Ctrl+A seleziona sempre l'intero percorso e, per comodita',
 //   lo fanno anche Ctrl+Shift+Su e Ctrl+Shift+Home. La selezione puo' quindi
@@ -767,11 +772,16 @@ function Enable-FadeIn($form) {
         $fadeTimer = New-Object System.Windows.Forms.Timer
         $fadeTimer.Interval = 15
         $fadeTimer.Add_Tick({
+            param($timerSender, $timerEvent)
             $next = $form.Opacity + 0.15
             if ($next -ge 1.0) {
                 $form.Opacity = 1.0
-                $fadeTimer.Stop()
-                $fadeTimer.Dispose()
+                # Non catturare $fadeTimer: lo scope locale dell'evento Shown
+                # non esiste piu' quando scatta Tick e Windows PowerShell 5.1
+                # lo risolve quindi a $null. Il sender e' invece sempre il
+                # Timer che ha generato l'evento, anche dentro dialoghi modali.
+                $timerSender.Stop()
+                $timerSender.Dispose()
             } else {
                 $form.Opacity = $next
             }
@@ -1264,9 +1274,10 @@ $waitSpinnerTimer = New-Object System.Windows.Forms.Timer
 $waitSpinnerTimer.Interval = 20
 $waitSpinnerTimer.Add_Tick({
     $script:waitSpinnerAngle = ($script:waitSpinnerAngle + 8) % 360
-    $pnlWaitSpinner.Invalidate()
+    if ($null -ne $pnlWaitSpinner -and -not $pnlWaitSpinner.IsDisposed) {
+        $pnlWaitSpinner.Invalidate()
+    }
 })
-$waitSpinnerTimer.Start()
 
 function Show-Waiting($subText) {
     $lblWaitSub.Text = $subText
@@ -1278,6 +1289,7 @@ function Show-Waiting($subText) {
     $form.Text = ""Elaborazione in corso...""
     $form.AcceptButton = $null
     $form.CancelButton = $null
+    if (-not $waitSpinnerTimer.Enabled) { $waitSpinnerTimer.Start() }
     Center-Form $form 420 220
 }
 
@@ -1668,6 +1680,7 @@ $orchTimer.Add_Tick({
     $stageName = $cmd[""Stage""]
 
     if ($stageName -eq ""Decision"") {
+        $waitSpinnerTimer.Stop()
         $decisionInputFile = Join-Path $WorkDir ""decision_input.txt""
         $summaryText = """"
         if (Test-Path -LiteralPath $decisionInputFile) {
@@ -1686,6 +1699,7 @@ $orchTimer.Add_Tick({
         Center-Form $form 660 520
     }
     elseif ($stageName -eq ""Progress"") {
+        $waitSpinnerTimer.Stop()
         $progMeta = Read-KeyValueFile (Join-Path $WorkDir ""progress_meta.txt"")
         $script:progressOutFolder = $progMeta[""OutputFolder""]
         $script:progressStatusFile = Join-Path $WorkDir ""progress_status.txt""
@@ -1733,6 +1747,7 @@ $orchTimer.Add_Tick({
         # mostrato il log finale.
         $script:summaryDisplayed = $true
         $script:doneReceived = $true
+        $waitSpinnerTimer.Stop()
         $progressPollTimer.Stop()
         $progressRenderTimer.Stop()
         $progressSpinnerTimer.Stop()
