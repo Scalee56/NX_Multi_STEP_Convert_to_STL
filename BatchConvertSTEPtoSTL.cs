@@ -1,9 +1,19 @@
 // =============================================================================
-// NX Open Journal - Conversione massiva STEP -> STL (v15)
+// NX Open Journal - Conversione massiva STEP -> STL (v16)
 // Basato sul journal originale "journal.cs" (export singolo STL registrato in NX),
 // esteso per scorrere automaticamente tutti i file .stp/.step di una cartella.
 //
-// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v15):
+// COSA E' STATO CORRETTO/AGGIUNTO IN QUESTA VERSIONE (v16):
+// - I percorsi di input e output sono ora campi di testo pienamente
+//   modificabili: Ctrl+A seleziona sempre l'intero percorso e, per comodita',
+//   lo fanno anche Ctrl+Shift+Su e Ctrl+Shift+Home. La selezione puo' quindi
+//   essere immediatamente sostituita digitando o incollando un nuovo valore.
+// - Il pulsante "Sfoglia" apre ora un normale dialogo Esplora file di Windows,
+//   con barra degli indirizzi, accesso rapido e navigazione moderna, invece
+//   del vecchio FolderBrowserDialog ad albero. Lo stesso selettore moderno e'
+//   usato anche dal flusso di fallback.
+//
+// COSA ERA STATO CORRETTO/AGGIUNTO IN v15:
 // - FIX CRITICO: l'apertura di un file STEP (o di un .prt di componente gia'
 //   noto) con OpenActiveDisplay(..., DisplayPartOption.AllowAdditional, ...)
 //   non garantisce che la parte aperta diventi anche la "Work part" (puo'
@@ -507,7 +517,7 @@ public class NXJournal
         // eventuale risoluzione conflitti, e (a fine conversione) riepilogo.
         // Se PowerShell non fosse disponibile in questo ambiente per
         // qualunque motivo, il try/catch lo rileva e si passa
-        // automaticamente al fallback a soli MessageBox/FolderBrowserDialog
+        // automaticamente al fallback a soli MessageBox/OpenFileDialog
         // (RunFallbackFlow), con la stessa identica logica "chiedi solo se
         // serve".
         BatchDecision decision = BatchDecision.Stop;
@@ -688,6 +698,49 @@ function Style-TextBox($txt) {
     $txt.BorderStyle = ""FixedSingle""
     $txt.BackColor = $ClrCardBg
     $txt.ForeColor = $ClrText
+    # Rende esplicito il comportamento da normale riga di testo anche sulle
+    # versioni WinForms incluse nelle diverse installazioni di PowerShell.
+    $txt.ShortcutsEnabled = $true
+    $txt.WordWrap = $false
+    $txt.Add_KeyDown({
+        if (($_.Control -and $_.KeyCode -eq [System.Windows.Forms.Keys]::A) -or
+            ($_.Control -and $_.Shift -and
+             ($_.KeyCode -eq [System.Windows.Forms.Keys]::Up -or
+              $_.KeyCode -eq [System.Windows.Forms.Keys]::Home))) {
+            $this.SelectAll()
+            $_.SuppressKeyPress = $true
+            $_.Handled = $true
+        }
+    })
+}
+
+# OpenFileDialog usa la normale interfaccia Esplora file di Windows (barra
+# indirizzi, Accesso rapido, unita' e percorsi di rete). Il nome segnaposto
+# permette di confermare la cartella visualizzata senza dover scegliere un
+# file: dal risultato si conserva soltanto DirectoryName.
+function Select-FolderModern($initialPath, $title) {
+    $dlg = New-Object System.Windows.Forms.OpenFileDialog
+    $dlg.Title = $title
+    $dlg.CheckFileExists = $false
+    $dlg.CheckPathExists = $true
+    $dlg.ValidateNames = $false
+    $dlg.DereferenceLinks = $true
+    $dlg.RestoreDirectory = $true
+    $dlg.AutoUpgradeEnabled = $true
+    $dlg.Filter = ""Cartelle|*.folder""
+    $dlg.FileName = ""Seleziona questa cartella""
+    if (Test-Path -LiteralPath $initialPath -PathType Container) {
+        $dlg.InitialDirectory = $initialPath
+    }
+
+    try {
+        if ($dlg.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return $null }
+        if (Test-Path -LiteralPath $dlg.FileName -PathType Container) { return $dlg.FileName }
+        return [System.IO.Path]::GetDirectoryName($dlg.FileName)
+    }
+    finally {
+        $dlg.Dispose()
+    }
 }
 
 function Style-NumericUpDown($num) {
@@ -1020,9 +1073,8 @@ $btnBrowseIn.SetBounds(536, 96, 88, 30)
 $pnlConfig.Controls.Add($btnBrowseIn)
 Style-SecondaryButton $btnBrowseIn
 $btnBrowseIn.Add_Click({
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    if (Test-Path -LiteralPath $txtIn.Text) { $dlg.SelectedPath = $txtIn.Text }
-    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtIn.Text = $dlg.SelectedPath }
+    $selected = Select-FolderModern $txtIn.Text ""Seleziona la cartella dei file STEP""
+    if ($selected) { $txtIn.Text = $selected }
 })
 
 $lblOut = New-Object System.Windows.Forms.Label
@@ -1044,9 +1096,8 @@ $btnBrowseOut.SetBounds(536, 160, 88, 30)
 $pnlConfig.Controls.Add($btnBrowseOut)
 Style-SecondaryButton $btnBrowseOut
 $btnBrowseOut.Add_Click({
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    if (Test-Path -LiteralPath $txtOut.Text) { $dlg.SelectedPath = $txtOut.Text }
-    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $txtOut.Text = $dlg.SelectedPath }
+    $selected = Select-FolderModern $txtOut.Text ""Seleziona la cartella di output""
+    if ($selected) { $txtOut.Text = $selected }
 })
 
 $lblFormat = New-Object System.Windows.Forms.Label
@@ -2371,9 +2422,10 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     // quella di default?" - la cartella predefinita e' gia' preselezionata
     // nel dialogo stesso, quindi basta premere OK per confermarla cosi'
     // com'e', oppure navigare altrove prima di confermare. Annulla
-    // interrompe. FolderBrowserDialog (a differenza di una Form
-    // personalizzata) si appoggia al selettore di cartelle nativo di
-    // Windows, quindi non risente del problema di compatibilita'
+    // interrompe. OpenFileDialog mostra il normale Esplora file moderno e,
+    // usando un nome segnaposto senza richiedere che il file esista, permette
+    // di confermare la cartella corrente; dal risultato viene conservato il
+    // solo DirectoryName. Non risente del problema di compatibilita'
     // System.Drawing/System.Windows.Forms che colpisce Form.ShowDialog su
     // questa installazione NX - ma per sicurezza e' comunque avvolto in un
     // try/catch: se anche questo dovesse fallire, si ripiega sulla cartella
@@ -2382,16 +2434,28 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     {
         try
         {
-            using (FolderBrowserDialog dlg = new FolderBrowserDialog())
+            using (OpenFileDialog dlg = new OpenFileDialog())
             {
-                dlg.Description = "Cartella di " + folderDescription;
+                dlg.Title = "Seleziona la cartella di " + folderDescription;
+                dlg.CheckFileExists = false;
+                dlg.CheckPathExists = true;
+                dlg.ValidateNames = false;
+                dlg.DereferenceLinks = true;
+                dlg.RestoreDirectory = true;
+                dlg.AutoUpgradeEnabled = true;
+                dlg.Filter = "Cartelle|*.folder";
+                dlg.FileName = "Seleziona questa cartella";
                 if (Directory.Exists(defaultFolder))
                 {
-                    dlg.SelectedPath = defaultFolder;
+                    dlg.InitialDirectory = defaultFolder;
                 }
                 if (dlg.ShowDialog() == DialogResult.OK)
                 {
-                    return dlg.SelectedPath;
+                    if (Directory.Exists(dlg.FileName))
+                    {
+                        return dlg.FileName;
+                    }
+                    return Path.GetDirectoryName(dlg.FileName);
                 }
                 return null;
             }
