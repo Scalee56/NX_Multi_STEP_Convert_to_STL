@@ -2025,8 +2025,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
                 result.TotalSteps, result.Ok, result.Failed));
             lines.Add(string.Format("Componenti da assiemi: {0} riusciti, {1} falliti.",
                 result.CompOk, result.CompFailed));
-            lines.Add(string.Format("File {0} scritti: {1} ({2} corpi solidi, {3} corpi non chiusi).",
-                OutputFormatLabel, result.GrandFiles, result.GrandSolidBodies, result.GrandOpenBodies));
+            lines.Add(string.Format("File {0} scritti: {1} ({2} corpi solidi, {3} corpi non chiusi).", new object[] {
+                OutputFormatLabel, result.GrandFiles, result.GrandSolidBodies, result.GrandOpenBodies }));
             if (result.GrandSkippedFiles > 0)
             {
                 lines.Add(string.Format("File saltati perche' gia' esistenti: {0}.", result.GrandSkippedFiles));
@@ -2060,8 +2060,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     {
         List<string> lines = new List<string>();
         lines.Add(string.Format(
-            "Trovati {0} file STEP: {1} nuovi, {2} senza conflitti noti, {3} con conflitti rilevati.",
-            summary.TotalSteps, summary.NewCount, summary.NoConflictCount, summary.ConflictCount));
+            "Trovati {0} file STEP: {1} nuovi, {2} senza conflitti noti, {3} con conflitti rilevati.", new object[] {
+            summary.TotalSteps, summary.NewCount, summary.NoConflictCount, summary.ConflictCount }));
         lines.Add("");
         lines.Add("File con output gia' esistente:");
         foreach (ScanRow row in summary.Rows)
@@ -2506,8 +2506,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
     private static string BuildScanSummaryMessage(ScanSummary summary)
     {
         string text = string.Format(
-            "Trovati {0} file STEP: {1} nuovi, {2} senza conflitti noti, {3} con conflitti rilevati.",
-            summary.TotalSteps, summary.NewCount, summary.NoConflictCount, summary.ConflictCount);
+            "Trovati {0} file STEP: {1} nuovi, {2} senza conflitti noti, {3} con conflitti rilevati.", new object[] {
+            summary.TotalSteps, summary.NewCount, summary.NoConflictCount, summary.ConflictCount });
 
         List<string> conflictNames = new List<string>();
         foreach (ScanRow row in summary.Rows)
@@ -2549,8 +2549,8 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
         {
             List<string> lines = new List<string>();
             lines.Add(string.Format("Scansione del {0}", DateTime.Now));
-            lines.Add(string.Format("Trovati {0} file STEP: {1} nuovi, {2} senza conflitti noti, {3} con conflitti rilevati.",
-                summary.TotalSteps, summary.NewCount, summary.NoConflictCount, summary.ConflictCount));
+            lines.Add(string.Format("Trovati {0} file STEP: {1} nuovi, {2} senza conflitti noti, {3} con conflitti rilevati.", new object[] {
+                summary.TotalSteps, summary.NewCount, summary.NoConflictCount, summary.ConflictCount }));
             lines.Add("");
             foreach (ScanRow row in summary.Rows)
             {
@@ -3178,12 +3178,12 @@ if ($picPreview.Image) { $picPreview.Image.Dispose() }
 
             foreach (StepResult step in result.Steps)
             {
-                lines.Add(string.Format("[{0}/{1}] {2} — {3}", step.Number, result.TotalSteps,
-                    step.Success ? "OK" : "ERRORE", step.Name));
+                lines.Add(string.Format("[{0}/{1}] {2} — {3}", new object[] { step.Number, result.TotalSteps,
+                    step.Success ? "OK" : "ERRORE", step.Name }));
                 if (step.Success)
                 {
-                    lines.Add(string.Format("      {0} {1} → {2} {3}", step.SolidBodies,
-                        step.SolidBodies == 1 ? "solido" : "solidi", step.SolidBodies, OutputFormatLabel));
+                    lines.Add(string.Format("      {0} {1} → {2} {3}", new object[] { step.SolidBodies,
+                        step.SolidBodies == 1 ? "solido" : "solidi", step.SolidBodies, OutputFormatLabel }));
                     if (step.OpenBodies > 0)
                     {
                         lines.Add(string.Format("      {0} corpi non chiusi", step.OpenBodies));
@@ -3811,8 +3811,8 @@ finally {
         if (collision)
         {
             Log(lw, string.Format(
-                "     -> NOTA: il componente \"{0}\" e' gia' stato esportato per l'assieme \"{1}\": per evitare confusione questa occorrenza (da \"{2}\") viene rinominata in \"{3}\".",
-                partName, owner, stepBaseName, result));
+                "     -> NOTA: il componente \"{0}\" e' gia' stato esportato per l'assieme \"{1}\": per evitare confusione questa occorrenza (da \"{2}\") viene rinominata in \"{3}\".", new object[] {
+                partName, owner, stepBaseName, result }));
         }
 
         return result;
@@ -3992,8 +3992,8 @@ finally {
 
             string quantityNote = (total > 1) ? string.Format(" [istanza {0}/{1}]", occ, total) : "";
             string groupingNote = (compSolidBodies.Count + effectiveOpenCount > 1) ? " [raggruppato in sottocartella]" : "";
-            Log(lw, string.Format("     -> componente OK: {0}{1}{2} ({3} solidi, {4} non chiusi, {5} file)",
-                partName, quantityNote, groupingNote, compSolidBodies.Count, compOpenBodies.Count, filesWritten));
+            Log(lw, string.Format("     -> componente OK: {0}{1}{2} ({3} solidi, {4} non chiusi, {5} file)", new object[] {
+                partName, quantityNote, groupingNote, compSolidBodies.Count, compOpenBodies.Count, filesWritten }));
         }
         catch (Exception ex)
         {
@@ -4003,10 +4003,10 @@ finally {
             }
             compFailed++;
             TryAppendErrorLog(lw, errLogPath,
-                string.Format("{0} - componente {1} (occorrenza {2}/{3}) - {4}",
-                    DateTime.Now, partName, occ, total, ex.Message));
-            Log(lw, string.Format("     -> componente ERRORE: {0} [istanza {1}/{2}] - {3}",
-                partName, occ, total, ex.Message));
+                string.Format("{0} - componente {1} (occorrenza {2}/{3}) - {4}", new object[] {
+                    DateTime.Now, partName, occ, total, ex.Message }));
+            Log(lw, string.Format("     -> componente ERRORE: {0} [istanza {1}/{2}] - {3}", new object[] {
+                partName, occ, total, ex.Message }));
         }
     }
 
@@ -4105,8 +4105,8 @@ finally {
 
             grandFiles += filesWritten;
             compOk++;
-            Log(lw, string.Format("     -> componente OK (da .prt esistente): {0} ({1} solidi, {2} non chiusi, {3} file)",
-                fileBaseName, solidBodies.Count, openBodies.Count, filesWritten));
+            Log(lw, string.Format("     -> componente OK (da .prt esistente): {0} ({1} solidi, {2} non chiusi, {3} file)", new object[] {
+                fileBaseName, solidBodies.Count, openBodies.Count, filesWritten }));
         }
         catch (Exception ex)
         {
